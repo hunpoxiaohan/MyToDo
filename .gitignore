@@ -9,3 +9,4 @@ logs/
 !build.spec
 .pkgtest/
 .preview/
+.verifydata/

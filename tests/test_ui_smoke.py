@@ -492,3 +492,237 @@ def test_float_ball_edge_is_antialiased_inside_the_mask(qapp, window):
     assert partial, "球边没有半透明过渡像素，说明又被切成了锯齿"
     mask = window.ball.mask()
     assert all(mask.contains(QPoint(x, y)) for x in partial)
+
+
+def test_new_task_dialog_opens_and_saves(qapp, window):
+    """「+ 新任务」必须真的弹出一个能保存的表单。
+
+    曾经 TaskDialog 连到一个不存在的方法，构造时就抛异常，点按钮毫无反应，
+    而 GUI 进程没有控制台，错误被吞掉了。
+    """
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog
+
+    shown = []
+
+    def fill_and_close():
+        dlg = next((w for w in qapp.topLevelWidgets()
+                    if isinstance(w, QDialog) and w.isVisible()), None)
+        assert dlg is not None, "点了「新任务」但没有模态窗出现"
+        dlg.form.title_edit.setText("对话框新建")
+        shown.append(dlg)
+        dlg.form.save_btn.click()
+
+    QTimer.singleShot(0, fill_and_close)
+    window.open_new_task()
+
+    assert len(shown) == 1
+    assert not shown[0].isVisible(), "保存后对话框应当关闭"
+    assert [t.title for t in _repo(window).list()] == ["对话框新建"]
+    assert window.list.count() == 1, "保存后主列表要刷新"
+
+
+def test_task_dialog_completes_and_rolls(qapp, window):
+    """对话框里的「完成」走的是同一个关闭信号：关窗 + 周期任务滚到下一期。"""
+    from yiriyishi.core.models import STATUS_TODO
+    from yiriyishi.ui.task_form import TaskDialog
+
+    repo = _repo(window)
+    due = datetime.now() + timedelta(hours=1)
+    task = repo.create(title="周期活", recurrence="daily", due_time=due)
+    window.reload()
+
+    dlg = TaskDialog(window.t, repo, window.person_repo, task, window)
+    # 对话框本身没 show，子控件 isVisible() 恒为 False，只看「有没有被显式藏起来」
+    assert not dlg.form.complete_btn.isHidden() and not dlg.form.delete_btn.isHidden()
+    dlg.form.complete_btn.click()
+    assert not dlg.isVisible()
+
+    rolls = [t for t in repo.list() if t.status == STATUS_TODO]
+    assert len(rolls) == 1 and rolls[0].id != task.id
+    # 存进 sqlite 会抹掉微秒，比对要用同一精度
+    assert rolls[0].due_time == due.replace(microsecond=0) + timedelta(days=1)
+
+
+def test_new_task_stows_the_float_panel_first(qapp, window):
+    """面板是置顶窗，模态框会被压在它下面：弹对话框前必须先收起面板。"""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog
+
+    window.set_ball_visible(True, persist=False)
+    window._toggle_panel(True)
+    assert window._panel_open
+
+    def check_and_close():
+        dlg = next((w for w in qapp.topLevelWidgets()
+                    if isinstance(w, QDialog) and w.isVisible()), None)
+        assert dlg is not None, "点了「新任务」但没有模态窗出现"
+        assert not window._panel_open, "对话框弹出来时面板还压在它上面"
+        dlg.reject()
+
+    QTimer.singleShot(0, check_and_close)
+    window.open_new_task()
+
+
+
+def test_task_form_fits_both_of_its_containers(qapp, window):
+    """TaskForm 被两处复用：新任务对话框和右侧详情面板。
+
+    它的布局最小宽度一度是 825px，比两个容器都宽，于是「明天 09:00」「本周五」
+    「保存」被挤出可视区——在用户眼里就是按钮凭空消失。
+    """
+    from yiriyishi.ui.task_form import TaskDialog
+
+    window.resize(1100, 720)
+    window.show()
+    qapp.processEvents()
+
+    dlg = TaskDialog(window.t, window.task_repo, window.person_repo, None, window)
+    need = dlg.form.minimumSizeHint()
+    assert need.width() <= dlg.minimumWidth(), f"表单最小宽 {need.width()} > 对话框 {dlg.minimumWidth()}"
+    assert need.width() <= window.detail.width(), f"表单最小宽 {need.width()} > 详情面板 {window.detail.width()}"
+    dlg.show()
+    qapp.processEvents()
+    assert dlg.width() >= need.width() and dlg.height() >= need.height(), (
+        f"对话框 {dlg.width()}x{dlg.height()} 装不下表单 {need.width()}x{need.height()}，底部按钮会被裁掉")
+
+
+def test_settings_dialog_fits_chinese_and_persists(qapp, window, monkeypatch):
+    """设置窗三件事：内容别被裁掉「确定」、按钮别是英文 OK/Cancel、改了要落盘。"""
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    from yiriyishi.core.config import load_settings
+    from yiriyishi.ui import settings_dialog
+
+    # 真注册表碰不得：自启读写在测试里全部换成假实现
+    calls = []
+    monkeypatch.setattr(settings_dialog.autostart, "is_enabled", lambda *a: False)
+    monkeypatch.setattr(settings_dialog.autostart, "enable",
+                        lambda *a, **k: calls.append("on") or (True, ""))
+    monkeypatch.setattr(settings_dialog.autostart, "disable",
+                        lambda *a, **k: calls.append("off") or (True, ""))
+
+    dlg = settings_dialog.SettingsDialog(window.t, window.paths, window.settings,
+                                         window.apply_theme_mode, window)
+    dlg.show()
+    qapp.processEvents()
+
+    need = dlg.layout().minimumSize()
+    assert need.width() <= dlg.width() and need.height() <= dlg.height(), (
+        f"设置内容 {need.width()}x{need.height()} 装不进 {dlg.width()}x{dlg.height()}")
+
+    box = dlg.findChild(QDialogButtonBox)
+    assert sorted(b.text() for b in box.buttons()) == sorted(["确定", "取消"])
+
+    dlg.urgent.setValue(45)
+    box.button(QDialogButtonBox.StandardButton.Ok).click()
+
+    assert load_settings(window.paths).priority.urgent_minutes == 45
+    assert calls == ["off"], "没勾自启时应该走 disable，而且只能是假实现"
+
+
+def test_form_field_columns_line_up(qapp, window, monkeypatch):
+    """表单对齐：标签列左边缘一致，字段列左边缘一致。
+
+    曾经「标题」行挂在 QFormLayout 外面、_wrap 的子控件带着 Qt 默认边距，
+    两处都会让字段左边缘参差，肉眼看着就是"没对齐"。
+    """
+    from PySide6.QtWidgets import QDialogButtonBox, QPushButton
+
+    from yiriyishi.ui import settings_dialog
+    from yiriyishi.ui.task_form import TaskDialog
+
+    monkeypatch.setattr(settings_dialog.autostart, "is_enabled", lambda *a: False)
+    monkeypatch.setattr(settings_dialog.autostart, "enable", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(settings_dialog.autostart, "disable", lambda *a, **k: (True, ""))
+
+    task = TaskDialog(window.t, window.task_repo, window.person_repo, None, window)
+    task.show()
+    qapp.processEvents()
+    quick = next(b for b in task.findChildren(QPushButton) if b.text() == "今天 18:00")
+    task_fields = {
+        "标题": task.form.title_edit, "负责人": task.form.owner,
+        "完成时间": task.form.due_enable, "快捷时间": quick,
+        "周期": task.form.recurrence, "重要度": task.form.importance,
+        "提前提醒": task.form.reminder,
+    }
+    _assert_one_column(task, task_fields)
+    task.deleteLater()
+
+    settings = settings_dialog.SettingsDialog(window.t, window.paths, window.settings,
+                                              window.apply_theme_mode, window)
+    settings.show()
+    qapp.processEvents()
+    _assert_one_column(settings, {
+        "紧急阈值": settings.urgent, "临近阈值": settings.warning,
+        "跨天临近": settings.near, "本周内": settings.week,
+        # 只量每行第一个控件：静默结束跟在同一行"至"后面，本就不在字段列上
+        "静默开始": settings.dnd_start,
+        "主题": settings.theme, "备份目录": settings.backup_dir,
+    })
+    settings.deleteLater()
+
+
+def _assert_one_column(host, fields):
+    edges = {name: w.mapTo(host, w.rect().topLeft()).x() for name, w in fields.items()}
+    bad = {n: x for n, x in edges.items() if x != min(edges.values())}
+    assert not bad, f"字段列左边缘不齐：{edges}"
+
+
+def test_real_click_on_row_loads_detail_and_survives_refresh(qapp, window):
+    """鼠标真实点击一行要能选中并联动右侧详情，且 30 秒刷新后不丢。
+
+    以前同名链路只被 select_task()+_sync_detail() 手动调用覆盖过，
+    绕开了 currentItemChanged 这条真实信号，点不动这类问题测不出来。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    task = _repo(window).create(title="点我", importance=3)
+    window.reload()
+    window.resize(1120, 720)
+    window.show()
+    qapp.processEvents()
+
+    row = window.list.item(0)
+    assert row.data(ROLE_TASK).id == task.id
+    QTest.mouseClick(window.list.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier,
+                     window.list.visualItemRect(row).center())
+    qapp.processEvents()
+
+    assert window.list.currentRow() == 0, "真实点击没选中行"
+    assert window.detail.title_edit.text() == "点我"
+
+    window.reload()
+    qapp.processEvents()
+    assert window.list.currentRow() == 0, "定时刷新把选中行弄丢了"
+    assert window.detail.title_edit.text() == "点我"
+
+
+def test_non_default_saved_sort_does_not_crash_construction(qapp, gui_paths, monkeypatch):
+    """存过"按到期时间"时，构造主窗不能炸。
+
+    FilterBar.set_sort 在信号已连接后才恢复排序，索引一变就同步触发
+    _on_sort → reload()，而 self.list 还没建出来。打包成 GUI 后没有控制台，
+    这条 AttributeError 只留在日志里，表现就是排序设置悄悄失效。
+    """
+    import sys
+
+    from yiriyishi.core.config import load_settings, save_settings
+    from yiriyishi.ui.main_window import MainWindow
+
+    settings = load_settings(gui_paths)
+    settings.default_sort = "due"
+    save_settings(gui_paths, settings)
+
+    caught = []
+    monkeypatch.setattr(sys, "excepthook", lambda kind, value, tb: caught.append(value))
+
+    window = MainWindow(gui_paths)
+    try:
+        assert not caught, f"构造主窗时槽函数抛了异常：{caught}"
+        assert window.filter.sort.currentData() == "due"
+        assert window.list is not None
+    finally:
+        window.quit_app()

@@ -11,7 +11,7 @@ from .core.autostart import enable as autostart_enable
 from .core.autostart import is_enabled as autostart_is_enabled
 from .core.config import load_settings
 from .core.db import connect, init_db
-from .core.log import setup_logging
+from .core.log import install_exception_logger, setup_logging
 from .core.notify import make_notifier
 from .core.scheduler import SchedulerThread
 from .paths import Paths
@@ -49,6 +49,7 @@ def build(argv: list[str] | None = None):
 
     paths = Paths(args.datadir)
     setup_logging(paths, debug=args.debug)
+    install_exception_logger()
     log.info("数据目录：%s", paths.root)
 
     conn = connect(paths.db)

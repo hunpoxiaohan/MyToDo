@@ -31,36 +31,36 @@ class SettingsDialog(QDialog):
 
         # ---- 优先级阈值 ----
         box_priority = QGroupBox("优先级阈值（按完成日期自动判级）")
-        form = QFormLayout(box_priority)
+        form = _form(box_priority)
         p = settings.priority
         self.urgent = QSpinBox()
         self.urgent.setRange(5, 720)
         self.urgent.setSuffix(" 分钟")
         self.urgent.setValue(p.urgent_minutes)
-        form.addRow("当天任务剩多久算紧急（红）", self.urgent)
+        form.addRow("当天 · 紧急（红）", self.urgent)
 
         self.warning = QSpinBox()
         self.warning.setRange(1, 24)
         self.warning.setSuffix(" 小时")
         self.warning.setValue(p.warning_hours)
-        form.addRow("当天任务剩多久算临近（黄）", self.warning)
+        form.addRow("当天 · 临近（黄）", self.warning)
 
         self.near = QSpinBox()
         self.near.setRange(1, 30)
         self.near.setSuffix(" 天")
         self.near.setValue(p.near_days)
-        form.addRow("跨天任务剩多久算临近（黄）", self.near)
+        form.addRow("跨天 · 临近（黄）", self.near)
 
         self.week = QSpinBox()
         self.week.setRange(2, 90)
         self.week.setSuffix(" 天")
         self.week.setValue(p.week_days)
-        form.addRow("跨天任务剩多久算本周内（浅绿）", self.week)
+        form.addRow("跨天 · 本周内（浅绿）", self.week)
         root.addWidget(box_priority)
 
         # ---- 提醒 ----
         box_dnd = QGroupBox("提醒与免打扰")
-        form_dnd = QFormLayout(box_dnd)
+        form_dnd = _form(box_dnd)
         self.dnd_enabled = QCheckBox("启用免打扰时段（期间只记录不弹窗）")
         self.dnd_enabled.setChecked(settings.dnd_enabled)
         form_dnd.addRow(self.dnd_enabled)
@@ -73,12 +73,16 @@ class SettingsDialog(QDialog):
         times.addWidget(QLabel("至"))
         times.addWidget(self.dnd_end)
         times.addStretch(1)
-        form_dnd.addRow("静默时段（支持跨午夜）", _wrap(times))
+        # 跨午夜说明走 tooltip：写成行内文字会让这一行比对话框还宽，整窗被撑开
+        midnight_tip = "静默时段支持跨午夜，例如 22:00 至 08:00"
+        self.dnd_start.setToolTip(midnight_tip)
+        self.dnd_end.setToolTip(midnight_tip)
+        form_dnd.addRow("静默时段", _wrap(times))
         root.addWidget(box_dnd)
 
         # ---- 外观 ----
         box_ui = QGroupBox("外观与启动")
-        form_ui = QFormLayout(box_ui)
+        form_ui = _form(box_ui)
         self.theme = QComboBox()
         for value, label in (("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
             self.theme.addItem(label, value)
@@ -97,7 +101,7 @@ class SettingsDialog(QDialog):
 
         # ---- 数据 / 备份 ----
         box_data = QGroupBox("数据与联网备份")
-        form_data = QFormLayout(box_data)
+        form_data = _form(box_data)
         row = QHBoxLayout()
         self.backup_dir = QLineEdit(settings.backup_dir or "")
         self.backup_dir.setPlaceholderText("例如 D:\\Sync\\yiriyishi（可指向坚果云/OneDrive 目录）")
@@ -112,9 +116,14 @@ class SettingsDialog(QDialog):
         form_data.addRow(self.backup_status)
         root.addWidget(box_data)
 
+        _align_labels(form, form_dnd, form_ui, form_data)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        # Qt 不带中文语言包，标准按钮默认是英文的 OK / Cancel
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -158,7 +167,32 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+def _form(parent: QGroupBox) -> QFormLayout:
+    form = QFormLayout(parent)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    form.setHorizontalSpacing(12)
+    form.setVerticalSpacing(8)
+    return form
+
+
+def _align_labels(*forms: QFormLayout) -> None:
+    """每个分组有自己的 QFormLayout，列宽各算各的，字段左边缘会参差；统一成最宽标签的宽度。"""
+    labels = []
+    for form in forms:
+        for row in range(form.rowCount()):
+            item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            widget = item.widget() if item is not None else None
+            if isinstance(widget, QLabel):
+                labels.append(widget)
+    widest = max((label.sizeHint().width() for label in labels), default=0)
+    for label in labels:
+        label.setMinimumWidth(widest)
+
+
 def _wrap(layout) -> QWidget:
     host = QWidget()
+    # 布局放进子控件时 Qt 会带上默认边距，整行会比同列表单行缩进一截
+    layout.setContentsMargins(0, 0, 0, 0)
     host.setLayout(layout)
     return host

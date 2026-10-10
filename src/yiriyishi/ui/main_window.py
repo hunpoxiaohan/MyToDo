@@ -103,8 +103,10 @@ class MainWindow(QMainWindow):
         self.filter.category_changed.connect(self._on_category)
         self.filter.search_changed.connect(self._on_search)
         self.filter.owner_changed.connect(self._on_owner)
-        self.filter.sort_changed.connect(self._on_sort)
+        # 先恢复再连信号：连完再 set_sort 会在 self.list 建好之前就触发
+        # _on_sort → reload()，打包后没有控制台，只留下日志里的 AttributeError
         self.filter.set_sort(self._sort)
+        self.filter.sort_changed.connect(self._on_sort)
         root.addWidget(self.filter)
 
         self.toast = ToastBanner(self.t)
@@ -210,6 +212,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------- 交互 -------------------------------
     def open_new_task(self) -> None:
+        # 面板是置顶窗，会把模态框压在下面继续吃掉点击；先收起来（和 show_main 一样）
+        self._toggle_panel(False)
         dlg = TaskDialog(self.t, self.task_repo, self.person_repo, None, self)
         dlg.form.saved.connect(lambda _id: self.reload())
         dlg.exec()

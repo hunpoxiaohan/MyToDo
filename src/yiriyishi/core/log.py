@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 
 from ..paths import Paths
@@ -26,3 +27,18 @@ def setup_logging(paths: Paths, debug: bool = False) -> logging.Logger:
     stream.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
     root.addHandler(stream)
     return root
+
+
+def install_exception_logger() -> None:
+    """打包成 GUI 进程后没有控制台：未捕获异常只会被 Qt 的 C++ 调用方吞掉。
+
+    接进 sys.excepthook 写进日志，否则「点了没反应」这类故障查无可查。
+    """
+    root = logging.getLogger("yiriyishi")
+    default = sys.__excepthook__
+
+    def hook(kind, value, tb):
+        root.critical("未捕获异常", exc_info=(kind, value, tb))
+        default(kind, value, tb)
+
+    sys.excepthook = hook

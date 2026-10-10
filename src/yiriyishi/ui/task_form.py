@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDateTimeEdit, QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QComboBox, QDateTimeEdit, QDialog, QFormLayout, QHBoxLayout, QLineEdit,
     QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -80,17 +80,16 @@ class TaskForm(QWidget):
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(10)
 
-        head = QHBoxLayout()
+        form = QFormLayout()
+        # 左对齐：中文标签长短不一，右对齐会让标签列的右边缘参差，字段列看着没对齐
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setSpacing(8)
+
         self.title_edit = QLineEdit()
         self.title_edit.setPlaceholderText("任务标题")
         self.title_edit.setFont(ui_font(12, True))
-        head.addWidget(QLabel("标题"))
-        head.addWidget(self.title_edit, 1)
-        root.addLayout(head)
-
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setSpacing(8)
+        form.addRow("标题", self.title_edit)
 
         self.owner = OwnerCombo(person_repo.list())
         form.addRow("负责人", self.owner)
@@ -107,11 +106,17 @@ class TaskForm(QWidget):
         self.due_edit.setDateTime(datetime.now().replace(minute=0) + timedelta(hours=1))
         due_row.addWidget(self.due_enable)
         due_row.addWidget(self.due_edit, 1)
+        form.addRow("完成时间", _wrap(due_row))
+
+        # 快捷时间单独一行：和上面挤一行会要 800+px，比对话框和详情面板都宽
+        quick_row = QHBoxLayout()
         for label, offset in (("今天 18:00", None), ("明天 09:00", 1), ("本周五", 2)):
             btn = QPushButton(label)
+            btn.setObjectName("Ghost")
             btn.clicked.connect(lambda _=False, spec=offset, text=label: self._quick_due(spec, text))
-            due_row.addWidget(btn)
-        form.addRow("完成时间", _wrap(due_row))
+            quick_row.addWidget(btn)
+        quick_row.addStretch(1)
+        form.addRow("", _wrap(quick_row))
 
         self.recurrence = QComboBox()
         for value, label in RECURRENCE_OPTIONS:
@@ -262,7 +267,8 @@ class TaskDialog(QDialog):
     def __init__(self, tokens, task_repo, person_repo, task: Task | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("编辑任务" if task else "新任务")
-        self.setMinimumSize(460, 520)
+        # 只锁宽度：显式最小高会盖掉布局算出的最小高，「保存」就被挤到窗口外面
+        self.setMinimumWidth(480)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.form = TaskForm(tokens, task_repo, person_repo, self, modal=True)
@@ -274,9 +280,15 @@ class TaskDialog(QDialog):
         if task:
             self.form.load_task(task)
 
+    def _on_saved(self, _task_id: str) -> None:
+        """保存 / 完成 / 删除都意味着这次编辑结束了。"""
+        self.accept()
+
 
 def _wrap(hlay: QHBoxLayout) -> QWidget:
     host = QWidget()
+    # 布局放进子控件时 Qt 会带上默认边距，整行会比同列表单行缩进一截
+    hlay.setContentsMargins(0, 0, 0, 0)
     host.setLayout(hlay)
     return host
 
