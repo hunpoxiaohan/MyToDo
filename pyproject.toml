@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yiriyishi"
+version = "0.1.0"
+description = "一日一事 —— 本地优先的跨平台待办与悬浮球提醒应用"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.5",
+    "plyer>=2.1",
+    "windows-toasts>=1.2; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6"]
+
+[project.scripts]
+yiriyishi = "yiriyishi.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gui: 需要 QApplication（offscreen 平台）的界面测试",
+]

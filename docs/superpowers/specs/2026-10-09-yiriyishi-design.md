@@ -14,7 +14,7 @@
 
 | 项 | 选择 | 理由 |
 |---|---|---|
-| GUI | PySide6（Qt6 Widgets） | 悬浮球需要无边框半透明置顶窗、托盘、动画、深浅色跟随系统，Qt 能干净做到；CustomTkinter 这些全要手写 |
+| GUI | PySide6（Qt6 Widgets） | 悬浮球需要无边框置顶窗、托盘、动画、深浅色跟随系统，Qt 能干净做到；CustomTkinter 这些全要手写 |
 | 存储 | SQLite（任务/人员）+ JSON（偏好/阈值/自启状态） | 结构化数据进 DB，易变偏好进 JSON，避免为几个开关建表 |
 | 通知 | Windows 用 `windows-toasts`，macOS/Linux 用 `plyer` | 验收要求"点击通知唤起窗口"，plyer 在 Windows 的 PowerShell toast 无点击回调 |
 | 依赖环境 | 项目内 `.venv` | 不污染已有全局 Python 3.12.10 环境 |
@@ -151,11 +151,13 @@ score = importance * 10 + time_urgency_factor
 
 ## 6. 提醒链路
 
-QThread 内 30 秒 tick：取 `status='todo' AND due_time IS NOT NULL`，触发点 `now ≥ due - reminder_offset`（若 `postponed_until` 存在则用它作参照）且 `last_notified_at` 为空 → 发系统通知 + 应用内 Toast 横幅 → 回写 `last_notified_at` 去重。
+QThread 内 30 秒 tick：取 `status='todo' AND due_time IS NOT NULL`，触发点 `now ≥ due - reminder_offset`（若 `postponed_until` 存在则用它作参照）且 `last_notified_at` 为空 → 回写 `last_notified_at` 去重，并把 `(任务, 通知内容)` 交给 GUI 线程发送系统通知 + 应用内 Toast 横幅。
+
+**职责切分**：扫描线程只做「决定该提醒谁」这类纯逻辑 + SQLite 读写；真正的通知发送留在 GUI 线程。原因是 WinRT toast（windows-toasts）绑定 COM 套间，跨线程调用会抛 `RPC_E_CHANGED_MODE`（实测崩溃），把发送收敛到 GUI 线程同时让点击回调天然回到主线程。先标记后发送也保证发送失败不会每 30 秒重试轰炸。
 
 免打扰时段（默认 22:00–08:00，支持跨午夜）：期间**只写 `last_notified_at` 与日志，不弹窗**，避免时段结束后一次性轰炸。到期未处理的任务不再重复通知，改由 UI 红色闪烁承担提醒职责。
 
-Windows 点击唤起：`windows-toasts` 的 `on_activated` 回调在非 GUI 线程触发 → 经 QObject 信号（队列连接）回主线程 → `show + raise + activateWindow + 选中并滚动到该任务 + 高亮 1.5s`。启动时调 `SetCurrentProcessExplicitAppUserModelID` 保证通知归属应用。macOS/Linux 走 plyer，点击定位降级为双击托盘唤起，属已知限制。
+Windows 点击唤起：`windows-toasts` 的 `on_activated` 回调经 QObject 信号回主线程 → `show + raise + activateWindow + 选中并滚动到该任务 + 高亮 1.5s`。启动时调 `SetCurrentProcessExplicitAppUserModelID` 保证通知归属应用。macOS/Linux 走 plyer，点击定位降级为双击托盘唤起，属已知限制。
 
 应用内 Toast 横幅支持「推迟 15 分钟」：写 `postponed_until = now + 15min`、清空 `last_notified_at`，不改 `due_time`，因此分类与颜色随之后移。
 
@@ -163,9 +165,11 @@ Windows 点击唤起：`windows-toasts` 的 `on_activated` 回调在非 GUI 线�
 
 ## 7. 悬浮球与托盘
 
-悬浮球：`Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool`，48px 圆形半透明，`paintEvent` 画鼠尾草绿圆 + 白色任务图标 + 右上角红点数字（逾期数 + 今日待办数，均为 0 时不画红点）。按下即拖（移动超过 4px 判定拖拽，否则算点击），位置写 `config.json`；单击展开/收起面板，面板靠屏幕边缘时自动翻转方向避免出界。鼠标移出面板 400ms 后自动收起。设置里可完全隐藏悬浮球。
+悬浮球：`Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool`，48px 圆形，`paintEvent` 画鼠尾草绿圆 + 白色清单图标 + 右上角红点数字（逾期数 + 今日待办数，均为 0 时不画红点）。形状处理上 alpha 与 mask 都要：`WA_TranslucentBackground` 提供边缘抗锯齿（本体是实心色，不半透明），`setMask` 把形状之外那圈透明像素从窗口里切掉（本体椭圆 ∪ 角标椭圆，外扩 1–2px 免得切进渐变带）。只用前者会留下一个看不见却吞点击与滚轮的矩形，只用后者圆边全是 1-bit 台阶。清单图标用 `QPainter` 画三条横线而不是打 `☰`：中文字体族不一定收这些符号码位，缺字会渲染成方框。按下即拖（移动超过 4px 判定拖拽，否则算点击），位置写 `config.json`；单击展开/收起面板，面板靠屏幕边缘时自动翻转方向避免出界。收起方式：面板内 ×、再次单击悬浮球、或唤起主窗口。设置里可完全隐藏悬浮球。
 
-面板 320×420：四个分组标题（逾期 n / 今日 n / 周期 n / 未来 n），每组最多显示 5 条，超出显示"查看全部"跳主窗口；每条一行 = 优先级色点 + 标题（超长截断）+ 负责人 + 剩余时间（"3h 后"/"已逾期 2h"）。点击一条 → 唤起主窗口并定位。面板顶部一个「+ 新任务」快捷入口。
+面板 340×≤460：四个分组标题（逾期 n / 今日 n / 周期 n / 未来 n），每组最多显示 5 条，超出显示"查看全部"跳主窗口；每条一行 = 优先级色点（`QPixmap` 画出来的圆点，同样不用 `●` 字符）+ 标题（超长截断），第二行负责人与剩余时间（"3h 后"/"已逾期 2h"），行尾一个「完成」按钮。整行悬停时底色与描边同时变化（`#PanelRow:hover`，靠 `WA_Hover` 触发）。
+
+面板里两个动作分工明确：点行 = 唤起主窗并定位；点「完成」= **就地完成且不唤起主窗**，周期任务自动滚到下一期，面板随即重绘。这样"清掉一条"从「点开→回主窗→点完成」三步变成一步。`FloatPanel.task_completed(str)` 与 `task_activated(str)` 是两个独立信号，主窗分别接到 `complete_task()` 与 `focus_task()`。面板顶部另有「+ 新任务」「主窗口」「×」。
 
 托盘：`setQuitOnLastWindowClosed(False)`，关窗 = 隐藏到托盘（首次弹提示），右键菜单「显示主窗口 / 暂停提醒 / 隐藏悬浮球 / 退出」。仅「退出」真正 `quit()`，并顺带停线程、关连接。
 
@@ -176,19 +180,42 @@ Windows 点击唤起：`windows-toasts` 的 `on_activated` 回调在非 GUI 线�
 单页布局，不做多级导航：
 
 ```
-┌───────────────────────────────────────────────────┐
-│ [+ 新任务]  [逾期|今日|周期|未来|已完成|全部]  人▾ 排序▾ 🔍 │
-├───────────────────────────┬───────────────────────┤
-│ 任务列表（色条 + 标题 +    │  详情 / 编辑          │
-│ 负责人色点 + 剩余时间）    │  标题 负责人 到期时间  │
-│                           │  周期规则 星级 备注    │
-│                           │  [完成] [删除]        │
-└───────────────────────────┴───────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│ 一日一事                                     [设置] [+ 新任务] │
+│ ┌─ 筛选卡片 ─────────────────────────────────────────┐ │
+│ │ [全部][逾期][今日][周期][未来][已完成]              │ │
+│ │ [搜索标题…                        ] [人员▾] [排序▾]│ │
+│ └────────────────────────────────────────────────────┘ │
+├────────────────────────┬───────────────────────────────┤
+│ 任务行卡片列表          │  详情 / 编辑卡片              │
+│ （色条 + 标题 +        │  标题 负责人 完成时间(+快捷)  │
+│   负责人·剩余时间 +    │  周期 重要度 提前提醒         │
+│   右侧周期标记与星级）  │  备注（随窗口一起长高）        │
+│                        │  [保存] [完成] [删除]         │
+└────────────────────────┴───────────────────────────────┘
+  顶部横幅：应用内提醒（推迟 15 分钟）    底部：待办/今日/逾期/完成统计
 ```
 
-筛选：分类 chips 单选 + 人员下拉（多选）+ 关键词搜标题，三者取交集；状态默认排除 archived。排序下拉写回 `config.json` 作为记忆值。双击列表项进编辑，右键菜单含「完成 / 推迟 15 分钟 / 删除 / 归档」。日期选择用 `QDateTimeEdit` + 三个快捷按钮（今天 18:00 / 明天 09:00 / 本周五 18:00），避免手打。备注用 `QTextEdit` 存 HTML 子集，粘贴纯文本自动转义。
+筛选：分类 chips 单选 + 人员下拉（单选，含"全部人员"）+ 关键词搜标题，三者取交集；状态默认排除 archived。排序下拉写回 `config.json` 作为记忆值。双击列表项进编辑，右键菜单含「完成 / 推迟 15 分钟 / 删除 / 归档」。日期选择用 `QDateTimeEdit` + 三个快捷按钮（今天 18:00 / 明天 09:00 / 本周五 18:00），避免手打。备注用 `QTextEdit` 存 HTML 子集，粘贴纯文本自动转义。
 
-配色：浅底 `#F5F5F7`，强调 `#8A9A5B`；深底 `#1C1E21`、卡片 `#26292E`。字体：中文走系统族（Microsoft YaHei / PingFang SC / Noto Sans CJK 回退），数字与日期用等宽（Consolas / Menlo / DejaVu Sans Mono）。深色跟随系统用 `QStyleHints.colorScheme()`（Qt≥6.5）+ 监听变更事件重贴 QSS，设置里可切「跟随系统 / 强制浅 / 强制深」。所有颜色一律从 `theme.py` 的 token 取，禁止控件内硬编码 hex——这是验收"切深色无文字不可见"的实现前提。
+### 视觉语言：暖中性 + 柔和留白
+
+底色走奶油/燕麦一路的暖中性，品牌色保留偏暖的鼠尾草绿，**优先级语义色（红/黄/灰/绿）恒定不随主题变**——它们是信息，不是装饰。层次不靠投影（Qt QSS 不支持 `box-shadow`），靠「描边 + 三级暖色深浅」：`bg` 页面底 → `surface` 卡片 → `surface_alt` 分组/悬停 → `hover` 再深一档。悬浮面板的卡片由 `paintEvent` 自绘，不走样式表：顶层透明窗口靠 QSS 画底色会整块画不出来。
+
+| token | 浅色 | 深色 | 用途 |
+| --- | --- | --- | --- |
+| `bg` | `#FAF7F2` | `#211D18` | 页面底 |
+| `surface` | `#FFFDFA` | `#2A251F` | 卡片、输入框 |
+| `surface_alt` | `#F3EDE4` | `#332D26` | 分组底、悬停 |
+| `hover` | `#EDE5D9` | `#3D362D` | 再深一档的交互态 |
+| `text` / `text_muted` | `#332F2A` / `#8B8378` | `#EFE8DE` / `#A69D8F` | 暖棕正文 / 次级 |
+| `border` | `#E8DFD2` | `#3C352C` | 描边 |
+| `accent` / `accent_soft` | `#8A9A5B` / `#E9EEDC` | `#A3B373` / `#3A4030` | 品牌 / 选中底 |
+| `danger` | `#E74C3C` | `#FF6B5B` | 逾期、红点 |
+
+圆角统一放大到 10–15px（卡片 14、按钮 10/11、chip 15 胶囊），字号阶梯 11/12/13/16，行高与外边距按 4px 栅格走。列表行由 delegate 自绘：常态 `surface`、悬停 `surface_alt`、选中 `accent_soft` + 1.5px 品牌描边，左侧优先级色条上下留 8px 而不是通高。
+
+字体：中文走系统族（Microsoft YaHei / PingFang SC / Noto Sans CJK 回退），数字与日期用等宽（Consolas / Menlo / DejaVu Sans Mono）。深色跟随系统用 `QStyleHints.colorScheme()`（Qt≥6.5），切换时原地 `refresh_tokens()` 换色、不重建控件。所有颜色一律从 `theme.py` 的 token 取，禁止控件内硬编码 hex——这是验收"切深色无文字不可见"的实现前提。`tests/test_ui_smoke.py` 里有两条测试守住这件事：QSS 属性必须在 Qt 支持白名单内、QSS 出现的 `#objectName` 必须真有控件在用（写错的属性 Qt 是静默失效的）。
 
 ## 9. 联网 / 同步
 
@@ -211,9 +238,11 @@ pytest（`core/` 全层，不依赖真实 GUI 与真实通知）：
 - `recurrence.py`：`daily` 跨月、`weekly:1,3,5`、`monthly:15` 月末不存在、`every_n_days:3`、完成后生成下期的 group 继承
 - `repository.py`：CRUD、人员停用后历史任务仍显示、去重字段、group 只返回当期
 - `config.py`：原子写、缺字段深合并默认值、损坏文件自动重建
-- `scheduler.py`：stub notifier 断言触发一次不重复、免打扰内只记不发、跨午夜时段、暂停提醒全跳过
+- `scheduler.py`：假时钟断言触发一次不重复、免打扰内只记不发、跨午夜时段、暂停提醒全跳过、tick 只产出 Reminder 不碰 notifier
 - `autostart.py`：三平台命令/键值构造走 dry-run，不改本机注册表
-- GUI：`QT_QPA_PLATFORM=offscreen` 冒烟（主窗、悬浮球、面板、深浅色切换不崩）
+- GUI：`QT_QPA_PLATFORM=offscreen` 冒烟（主窗、悬浮球、面板、深浅色切换不崩）+ `widget.grab()` 真实走一遍 paintEvent/delegate.paint（枚举名一类的运行期错误只有真绘制才暴露）。悬浮窗另有三条不变量测试：形状外的透明像素必须被 mask 排除、本体像素 alpha 必须为 255、圆边的抗锯齿像素必须落在 mask 内。
+- GUI：面板行内「完成」——点按钮只触发 `task_completed`，任务落库为 done、周期任务生成下一期、且不唤起主窗
+- GUI：样式表守卫两条——QSS 声明的属性必须在 Qt 白名单内（写错的属性静默失效），QSS 里的 `#objectName` 必须真有控件 `setObjectName` 在用（否则规则永远命不中）
 
 人工验收（真实系统级行为，按原需求 5 条 + 新增 3 条）：
 1. 建 1h 后到期的低优先级任务 → 黄色（1h > 30min 阈值）；时间推到剩 30min → 变红
@@ -221,7 +250,7 @@ pytest（`core/` 全层，不依赖真实 GUI 与真实通知）：
 3. 开启自启 → 重启电脑后自动运行且托盘/悬浮球可见
 4. 关主窗进程仍在，仅点「退出」才结束
 5. 切深色模式全元素适配，无文字不可见
-6. 悬浮球可拖拽、点击展开四分类面板、点条目定位任务、角标数字与列表一致
+6. 悬浮球可拖拽、点击展开四分类面板、点条目定位任务、**点行尾「完成」就地清掉一条（面板不关、不弹主窗）**、角标数字与列表一致、悬停整行变色
 7. 周期任务完成后自动生成下一期，"周期"分类只显示当期
 8. 筛选（分类 × 人员 × 关键词）与四种排序结果正确
 

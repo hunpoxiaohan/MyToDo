@@ -6,3 +6,6 @@ dist/
 *.spec
 .devdata/
 logs/
+!build.spec
+.pkgtest/
+.preview/
