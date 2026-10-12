@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDateTimeEdit, QDialog, QFormLayout, QHBoxLayout, QLineEdit,
-    QPushButton, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDialog, QFormLayout, QHBoxLayout,
+    QLineEdit, QPushButton, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..core.models import Person, Task, new_id
 from ..core.repository import PersonRepository, TaskRepository
 from ..core.recurrence import complete_and_roll
+from .note_timeline import NoteTimeline
+from .subtask_panel import SubTaskPanel
 from .theme import mono_font, ui_font
 
 RECURRENCE_OPTIONS = [
@@ -22,6 +24,12 @@ RECURRENCE_OPTIONS = [
     ("monthly:15", "每月 15 号"),
     ("every_n_days:3", "每 3 天"),
     ("every_n_days:7", "每 7 天"),
+]
+
+# 业界两种锚点：OmniFocus 的 Regularly / From Completion，Todoist 的 every / every!
+ANCHOR_OPTIONS = [
+    ("schedule", "按日程排（错过不往后漂）"),
+    ("completion", "从完成那天往后数"),
 ]
 
 STAR_OPTIONS = [(i, "★" * i + "☆" * (5 - i)) for i in range(1, 6)]
@@ -69,18 +77,20 @@ class TaskForm(QWidget):
     cancelled = Signal()
 
     def __init__(self, tokens, task_repo: TaskRepository, person_repo: PersonRepository,
-                 parent=None, modal: bool = False):
+                 parent=None, modal: bool = False, note_repo=None):
         super().__init__(parent)
         self.t = tokens
         self.task_repo = task_repo
         self.person_repo = person_repo
         self._task_id: str | None = None
+        self._parent_id: str | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(10)
 
         form = QFormLayout()
+        self.form_layout = form
         # 左对齐：中文标签长短不一，右对齐会让标签列的右边缘参差，字段列看着没对齐
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -123,6 +133,42 @@ class TaskForm(QWidget):
             self.recurrence.addItem(label, value)
         form.addRow("周期", self.recurrence)
 
+        # 周期细则单独成组：只有选了重复才现身，否则新任务对话框白占三行
+        self.rec_rules = QWidget()
+        self.rec_rules.setObjectName("RecurrenceRules")
+        rules = QFormLayout(self.rec_rules)
+        rules.setContentsMargins(0, 0, 0, 0)
+        rules.setSpacing(8)
+        rules.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        rules.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.rec_anchor = QComboBox()
+        for value, label in ANCHOR_OPTIONS:
+            self.rec_anchor.addItem(label, value)
+        rules.addRow("排期", self.rec_anchor)
+
+        until_row = QHBoxLayout()
+        self.rec_until_check = QCheckBox("有结束日期")
+        self.rec_until_edit = QDateEdit()
+        self.rec_until_edit.setCalendarPopup(True)
+        self.rec_until_edit.setDisplayFormat("yyyy-MM-dd")
+        self.rec_until_edit.setFont(mono_font(10))
+        self.rec_until_edit.setDate(QDate.currentDate().addDays(30))
+        self.rec_until_check.toggled.connect(self.rec_until_edit.setEnabled)
+        self.rec_until_edit.setEnabled(False)
+        until_row.addWidget(self.rec_until_check)
+        until_row.addWidget(self.rec_until_edit, 1)
+        rules.addRow("结束", _wrap(until_row))
+
+        self.rec_daily_remind = QCheckBox("没完成也每天到点提醒")
+        rules.addRow("提醒", self.rec_daily_remind)
+        self.rec_daily_remind.setToolTip(
+            "重复的是提醒，不是任务：只要今天有这一期又没完成，到点再叫你一次。")
+
+        form.addRow("", self.rec_rules)
+        self.recurrence.currentIndexChanged.connect(self._toggle_rec_rules)
+        self._toggle_rec_rules()
+
         self.importance = QComboBox()
         for value, label in STAR_OPTIONS:
             self.importance.addItem(label, value)
@@ -139,8 +185,26 @@ class TaskForm(QWidget):
 
         self.note_edit = QTextEdit()
         self.note_edit.setPlaceholderText("备注（支持粘贴，保留简单排版）")
-        self.note_edit.setMinimumHeight(120)
-        root.addWidget(self.note_edit, 1)
+        self.note_edit.setMinimumHeight(96)
+
+        # 只有拿到笔记仓库（= 任务详情面板）才建 Tab：新任务对话框里任务还不存在，
+        # 记不了东西，多一个空 Tab 只会让人以为能记。
+        self.notes = None
+        self.notes_tab = None
+        self.subtasks = None
+        if note_repo is not None:
+            self.notes_tab = QTabWidget()
+            self.notes_tab.setObjectName("NotesTab")
+            self.notes_tab.addTab(self.note_edit, "备注")
+            self.notes = NoteTimeline(self.t, note_repo)
+            self.notes_tab.addTab(self.notes, "记录")
+            self.notes.count_changed.connect(self._show_note_count)
+            # 子任务只在已有任务上成立，所以和新任务对话框一样走 note_repo 这道门
+            self.subtasks = SubTaskPanel(self.t, task_repo)
+            self.notes_tab.addTab(self.subtasks, "子任务")
+            root.addWidget(self.notes_tab, 1)
+        else:
+            root.addWidget(self.note_edit, 1)
 
         buttons = QHBoxLayout()
         self.save_btn = QPushButton("保存")
@@ -165,8 +229,20 @@ class TaskForm(QWidget):
         self._toggle_due(True)
 
     # ---- public ----
+    def set_parent(self, parent_id: str | None) -> None:
+        """挂到某个父任务下：周期整组藏掉 —— 子任务一期套一期会滚出无穷多份。"""
+        self._parent_id = parent_id
+        show = parent_id is None
+        self.recurrence.setVisible(show)
+        label = self.form_layout.labelForField(self.recurrence)
+        if label is not None:
+            label.setVisible(show)
+        self._toggle_rec_rules()
+
     def load_task(self, task: Task) -> None:
         self._task_id = task.id
+        self.set_parent(task.parent_id)
+        self.set_parent(task.parent_id)
         self.title_edit.setText(task.title)
         self.owner.setCurrentIndex(max(0, self.owner.findData(task.owner_id)))
         has_due = task.due_time is not None
@@ -175,24 +251,49 @@ class TaskForm(QWidget):
             self.due_edit.setDateTime(task.due_time)
         idx = self.recurrence.findData(task.recurrence)
         self.recurrence.setCurrentIndex(idx if idx >= 0 else 0)
+        aidx = self.rec_anchor.findData(task.recurrence_anchor)
+        self.rec_anchor.setCurrentIndex(aidx if aidx >= 0 else 0)
+        self.rec_until_check.setChecked(task.recurrence_until is not None)
+        if task.recurrence_until is not None:
+            self.rec_until_edit.setDate(QDate(task.recurrence_until.year,
+                                              task.recurrence_until.month,
+                                              task.recurrence_until.day))
+        self.rec_daily_remind.setChecked(task.repeat_reminder_daily)
+        self._toggle_rec_rules()
         self.importance.setCurrentIndex(max(0, min(4, task.importance - 1)))
         ridx = self.reminder.findData(task.reminder_offset)
         self.reminder.setCurrentIndex(ridx if ridx >= 0 else 2)
         self.note_edit.setHtml(task.note or "")
+        if self.notes is not None:
+            self.notes.set_task(task.id)
+        if self.subtasks is not None:
+            self.subtasks.load(task.id)
         self.complete_btn.setVisible(True)
         self.delete_btn.setVisible(True)
         self._toggle_due(has_due)
 
     def clear_form(self) -> None:
         self._task_id = None
+        self.set_parent(None)
         self.title_edit.clear()
         self.owner.setCurrentIndex(0)
         self.due_edit.setDateTime(datetime.now().replace(minute=0) + timedelta(hours=1))
         self.recurrence.setCurrentIndex(0)
+        self.rec_anchor.setCurrentIndex(0)
+        self.rec_until_check.setChecked(False)
+        self.rec_until_edit.setDate(QDate.currentDate().addDays(30))
+        self.rec_daily_remind.setChecked(False)
         self.importance.setCurrentIndex(2)
         self.note_edit.clear()
+        if self.notes is not None:
+            self.notes.set_task(None)
+        if self.subtasks is not None:
+            self.subtasks.load(None)
         self.complete_btn.setVisible(False)
         self.delete_btn.setVisible(False)
+
+    def _show_note_count(self, count: int) -> None:
+        self.notes_tab.setTabText(1, f"记录({count})")
 
     def refresh_persons(self, persons: list[Person]) -> None:
         self.owner.set_persons(persons)
@@ -214,7 +315,13 @@ class TaskForm(QWidget):
         task.note = self.note_edit.toHtml()
         task.owner_id = owner_id
         task.due_time = due
-        task.recurrence = self.recurrence.currentData()
+        task.parent_id = self._parent_id
+        task.recurrence = None if self._parent_id else self.recurrence.currentData()
+        task.recurrence_anchor = (self.rec_anchor.currentData()
+                                  if task.recurrence else "schedule")
+        task.repeat_reminder_daily = (self.rec_daily_remind.isChecked()
+                                      if task.recurrence else False)
+        task.recurrence_until = self._until_value() if task.recurrence else None
         task.reminder_offset = int(self.reminder.currentData())
         task.importance = int(self.importance.currentData())
         if task.recurrence and not task.recurrence_group_id:
@@ -248,6 +355,18 @@ class TaskForm(QWidget):
         self.recurrence.setEnabled(on)
         self.reminder.setEnabled(on)
         self.due_enable.setText("有截止时间" if on else "无截止时间")
+        self._toggle_rec_rules()
+
+    def _toggle_rec_rules(self) -> None:
+        self.rec_rules.setVisible(self._parent_id is None
+                                  and self.due_enable.isChecked()
+                                  and self.recurrence.currentData() is not None)
+
+    def _until_value(self):
+        if not self.rec_until_check.isChecked():
+            return None
+        day = self.rec_until_edit.date().toPython()
+        return datetime.combine(day, time.min)
 
     def _quick_due(self, spec, label: str) -> None:
         now = datetime.now()
@@ -264,9 +383,10 @@ class TaskForm(QWidget):
 
 
 class TaskDialog(QDialog):
-    def __init__(self, tokens, task_repo, person_repo, task: Task | None = None, parent=None):
+    def __init__(self, tokens, task_repo, person_repo, task: Task | None = None, parent=None,
+                 parent_id: str | None = None):
         super().__init__(parent)
-        self.setWindowTitle("编辑任务" if task else "新任务")
+        self.setWindowTitle("编辑任务" if task else ("新子任务" if parent_id else "新任务"))
         # 只锁宽度：显式最小高会盖掉布局算出的最小高，「保存」就被挤到窗口外面
         self.setMinimumWidth(480)
         lay = QVBoxLayout(self)
@@ -279,6 +399,8 @@ class TaskDialog(QDialog):
         self.form.cancelled.connect(self.reject)
         if task:
             self.form.load_task(task)
+        elif parent_id:
+            self.form.set_parent(parent_id)
 
     def _on_saved(self, _task_id: str) -> None:
         """保存 / 完成 / 删除都意味着这次编辑结束了。"""

@@ -78,6 +78,14 @@ class SettingsDialog(QDialog):
         self.dnd_start.setToolTip(midnight_tip)
         self.dnd_end.setToolTip(midnight_tip)
         form_dnd.addRow("静默时段", _wrap(times))
+
+        self.review_enabled = QCheckBox("每天推一条晨间回顾（逾期 / 今日 / 最紧急）")
+        self.review_enabled.setChecked(settings.morning_review_enabled)
+        form_dnd.addRow(self.review_enabled)
+        self.review_time = QTimeEdit(QTime.fromString(settings.morning_review_time, "HH:mm"))
+        self.review_time.setDisplayFormat("HH:mm")
+        self.review_time.setToolTip("一天只推一条；落在免打扰时段里会等到时段结束后再推")
+        form_dnd.addRow("回顾时间", self.review_time)
         root.addWidget(box_dnd)
 
         # ---- 外观 ----
@@ -147,6 +155,8 @@ class SettingsDialog(QDialog):
         s.dnd_enabled = self.dnd_enabled.isChecked()
         s.dnd_start = self.dnd_start.time().toString("HH:mm")
         s.dnd_end = self.dnd_end.time().toString("HH:mm")
+        s.morning_review_enabled = self.review_enabled.isChecked()
+        s.morning_review_time = self.review_time.time().toString("HH:mm")
         s.theme_mode = self.theme.currentData()
         s.float_ball_enabled = self.float_ball.isChecked()
         s.backup_dir = self.backup_dir.text().strip() or None

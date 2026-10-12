@@ -73,6 +73,7 @@ def build(argv: list[str] | None = None):
 
     scheduler = SchedulerThread(paths.db, lambda: window.settings)
     scheduler.due.connect(window.deliver_reminders)
+    scheduler.review_due.connect(window.deliver_review)
 
     if args.minimized or settings.start_minimized:
         window.hide()

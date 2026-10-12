@@ -6,7 +6,7 @@ import pytest
 
 from yiriyishi.core.db import connect, init_db
 from yiriyishi.core.models import AppSettings
-from yiriyishi.core.repository import TaskRepository
+from yiriyishi.core.repository import MetaRepository, TaskRepository
 from yiriyishi.core.scheduler import ReminderChecker
 
 NOW = datetime(2026, 10, 9, 12, 0, 0)
@@ -18,7 +18,7 @@ def env(tmp_path):
     init_db(conn)
     repo = TaskRepository(conn)
     settings = AppSettings()
-    return repo, settings, ReminderChecker(repo, lambda: settings)
+    return repo, settings, ReminderChecker(repo, lambda: settings, MetaRepository(conn))
 
 
 def _due(minutes):
@@ -108,3 +108,66 @@ def test_reminder_carries_task_id_for_activation(env):
     task = repo.create(title="带 id 的任务", due_time=_due(3))
     fired = checker.tick(NOW)
     assert fired[0].notification.task_id == task.id
+
+# ---------------- 晨间回顾：一天一条早报，只看时间不看完成 ----------------
+def _review(env, time_str="08:30"):
+    repo, settings, checker = env
+    settings.morning_review_enabled = True
+    settings.morning_review_time = time_str
+    return repo, settings, checker
+
+
+def test_morning_review_fires_once_after_its_time(env):
+    repo, _s, checker = _review(env)
+    repo.create(title="写周报", due_time=_due(60))
+    at_9 = NOW.replace(hour=9)
+    review = checker.morning_review(at_9)
+    assert review is not None
+    assert review.notification.title == "☀️ 晨间回顾"
+    assert checker.morning_review(at_9 + timedelta(minutes=1)) is None   # 一天只推一条
+
+
+def test_morning_review_waits_until_its_time(env):
+    repo, _s, checker = _review(env)
+    repo.create(title="写周报", due_time=_due(60))
+    assert checker.morning_review(NOW.replace(hour=8, minute=0)) is None
+
+
+def test_morning_review_is_silent_when_nothing_is_open(env):
+    _r, _s, checker = _review(env)
+    assert checker.morning_review(NOW) is None
+
+
+def test_morning_review_does_not_get_swallowed_by_quiet_hours(env):
+    """免打扰时段里不翻篇：时段结束后仍能补推，而不是被静默吃掉。"""
+    repo, settings, checker = _review(env)
+    settings.dnd_start, settings.dnd_end = "08:00", "10:00"
+    repo.create(title="写周报", due_time=_due(60))
+    assert checker.morning_review(NOW.replace(hour=9)) is None
+    assert checker.morning_review(NOW.replace(hour=11)) is not None
+
+
+def test_morning_review_names_the_most_urgent_task(env):
+    repo, _s, checker = _review(env)
+    repo.create(title="买牛奶", due_time=_due(600), importance=1)
+    repo.create(title="交房租", due_time=_due(-60), importance=5)
+    review = checker.morning_review(NOW)
+    assert "交房租" in review.notification.message
+    assert "逾期 1" in review.notification.message
+
+
+def test_morning_review_and_the_overdue_list_share_one_view(env):
+    """早报说「逾期 1」，点开逾期却列出两行 —— 计数和「最紧急」得用同一套口径。"""
+    repo, _s, checker = _review(env)
+    parent = repo.create(title="搬家", due_time=_due(14 * 1440))
+    repo.create(title="打包书房", parent_id=parent.id, due_time=_due(-120))
+    message = checker.morning_review(NOW).notification.message
+    assert "逾期 1" in message
+    assert "最紧急：搬家" in message
+
+
+def test_morning_review_switch_turns_it_off(env):
+    repo, settings, checker = _review(env)
+    settings.morning_review_enabled = False
+    repo.create(title="写周报", due_time=_due(60))
+    assert checker.morning_review(NOW) is None

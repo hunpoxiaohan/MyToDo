@@ -4,11 +4,11 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QRect, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton, QSplitter,
-    QSystemTrayIcon, QVBoxLayout, QWidget,
+    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
+    QScrollArea, QSplitter, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 from ..core import priority
@@ -18,11 +18,12 @@ from ..core.models import STATUS_TODO, Task
 from ..core.notify import Notifier
 from ..core.priority import Bucket
 from ..core.recurrence import complete_and_roll
-from ..core.repository import PersonRepository, TaskRepository
-from ..core.scheduler import Reminder
+from ..core.repository import NoteRepository, PersonRepository, TaskRepository
+from ..core.scheduler import REVIEW_TARGET, Reminder
 from ..paths import Paths, asset_dir
 from .filter_bar import FilterBar
 from .float_panel import BALL, FloatBall, FloatPanel
+from .overdue_banner import OverdueBanner
 from .settings_dialog import SettingsDialog
 from .task_form import TaskDialog, TaskForm
 from .task_list import TaskList
@@ -33,6 +34,24 @@ log = logging.getLogger("yiriyishi.ui.main_window")
 
 REFRESH_INTERVAL_MS = 60_000   # 每分钟重算优先级，让颜色随时间自动升级
 FLASH_INTERVAL_MS = 1000
+LIST_MIN_WIDTH = 260           # 再窄标题就整行省略，读不出任务是什么
+
+
+def _usable_rect() -> QRect:
+    """所有屏幕可用区的并集。只认主屏的话，摆在副屏上的窗口会被误判成越界。"""
+    rect = QRect()
+    for screen in QApplication.screens():
+        rect = rect.united(screen.availableGeometry())
+    return rect
+
+
+def _clamped(x: int, y: int, w: int, h: int) -> tuple[int, int]:
+    """把坐标拉回屏幕内：换过显示器后，存档位置能让窗口和悬浮球永久找不回来。"""
+    r = _usable_rect()
+    if r.isNull():
+        return x, y
+    return (min(max(x, r.left()), max(r.left(), r.right() - w + 1)),
+            min(max(y, r.top()), max(r.top(), r.bottom() - h + 1)))
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +68,7 @@ class MainWindow(QMainWindow):
         init_db(self.conn)
         self.task_repo = TaskRepository(self.conn)
         self.person_repo = PersonRepository(self.conn)
+        self.note_repo = NoteRepository(self.conn)
 
         self._category: Bucket | None = None
         self._owner: str | None = None
@@ -59,7 +79,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("一日一事")
         self.setWindowIcon(QIcon(str(asset_dir() / "app.png")))
-        self.resize(1060, 680)
+        self.resize(1060, 800)   # 详情表单最小高 574，视口再矮就把「保存」挤出可视区
 
         self._build_ui()
         self._build_tray()
@@ -114,22 +134,41 @@ class MainWindow(QMainWindow):
         self.toast.open_requested.connect(self.focus_task)
         root.addWidget(self.toast)
 
+        self.overdue_banner = OverdueBanner(self.t)
+        self.overdue_banner.postpone_all_requested.connect(self.postpone_all_overdue)
+        root.addWidget(self.overdue_banner)
+
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.list = TaskList(self.t)
+        self.list.setMinimumWidth(LIST_MIN_WIDTH)
         self.list.activated_task.connect(self.focus_task)
         self.list.currentItemChanged.connect(lambda *_: self._sync_detail())
         self.splitter.addWidget(self.list)
 
-        self.detail = TaskForm(self.t, self.task_repo, self.person_repo)
+        self.detail = TaskForm(self.t, self.task_repo, self.person_repo, note_repo=self.note_repo)
         self.detail.setObjectName("Card")
         self.detail.saved.connect(lambda _id: (self._clear_draft(), self.reload()))
         self.detail.completed.connect(self._on_completed)
         self.detail.deleted.connect(self._on_deleted)
+        self.detail.subtasks.changed.connect(self.reload)
+        self.detail.subtasks.add_requested.connect(self.open_new_subtask)
+        self.detail.subtasks.edit_requested.connect(self.open_task_edit)
         self.detail.title_edit.textEdited.connect(lambda *_: self._draft_timer.start())
         self.detail.note_edit.textChanged.connect(lambda *_: self._draft_timer.start())
-        self.splitter.addWidget(self.detail)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 2)
+
+        # 详情表单的自然最小高有 500 多，直接进分栏会把窗口顶到 700 多，
+        # 768 高的笔记本屏放不下；套一层滚动容器让溢出的部分自己滚。
+        self.detail_scroll = QScrollArea()
+        self.detail_scroll.setObjectName("DetailScroll")
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.detail_scroll.setWidget(self.detail)
+        self.splitter.addWidget(self.detail_scroll)
+
+        # 不用 setStretchFactor：它只在没有显式尺寸时参与分配，实测压不过最小宽，
+        # 想要的 3:2 从来没生效过。比例改由 save_geometry 里的 splitter 尺寸维持。
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
         root.addWidget(self.splitter, 1)
 
         self.status_label = QPushButton("")
@@ -191,6 +230,7 @@ class MainWindow(QMainWindow):
             bucket = priority.bucket_of(t, now)
             counts[bucket] = counts.get(bucket, 0) + 1
         self.filter.set_categories(counts)
+        self.overdue_banner.refresh(counts.get(Bucket.OVERDUE, 0), now)
 
         stats = self.task_repo.stats(now)
         self.status_label.setText(
@@ -229,10 +269,50 @@ class MainWindow(QMainWindow):
     def focus_task(self, task_id: str) -> None:
         """通知点击 / 面板点击 / 双击都会走这里：唤起主窗并定位。"""
         self.show_main()
+        if task_id == REVIEW_TARGET:
+            # 早报的点击定位的是「一批」任务，不是某一条
+            self._category = Bucket.OVERDUE
+            self._search = ""
+            self.reload()
+            return
         self._category = None
         self._search = ""
         self.reload()
-        self.list.select_task(task_id)
+        task = self.task_repo.get(task_id)
+        # 主列表没有子任务那一行，点它的通知就得落到父任务上（详情面板会展开它）
+        self.list.select_task(task.parent_id if task and task.parent_id else task_id)
+
+    def open_new_subtask(self, parent_id: str) -> None:
+        self._toggle_panel(False)
+        dlg = TaskDialog(self.t, self.task_repo, self.person_repo, None, self,
+                         parent_id=parent_id)
+        dlg.form.saved.connect(lambda _id: self.reload())
+        dlg.exec()
+
+    def open_task_edit(self, task_id: str) -> None:
+        task = self.task_repo.get(task_id)
+        if task is None:
+            return
+        self._toggle_panel(False)
+        dlg = TaskDialog(self.t, self.task_repo, self.person_repo, task, self)
+        dlg.form.saved.connect(lambda _id: self.reload())
+        dlg.exec()
+        self.reload()
+
+    def postpone_all_overdue(self, when: datetime) -> None:
+        """横幅上的整批顺延：走单条 postpone 的同一条通道，到新点会再提醒。"""
+        now = datetime.now()
+        ids = [t.id for t in self.task_repo.list() if priority.bucket_of(t, now) is Bucket.OVERDUE]
+        for task_id in ids:
+            self.task_repo.postpone(task_id, when)
+        self.reload()
+        self.toast.show_message(f"已把 {len(ids)} 项顺延到 {when:%m-%d %H:%M}", None, seconds=6)
+
+    def deliver_review(self, review: Reminder) -> None:
+        """晨间早报：系统通知是主通道，没有通知能力时退到应用内横幅。"""
+        if self.notifier is None or not self.notifier.notify(review.notification):
+            self.toast.show_message(review.notification.message, None, seconds=30)
+        self.reload()
 
     def postpone_task(self, task_id: str) -> None:
         self.task_repo.postpone(task_id, datetime.now() + timedelta(minutes=15))
@@ -313,8 +393,10 @@ class MainWindow(QMainWindow):
             self._toggle_panel(False)
 
     def _ball_pos(self) -> tuple[int, int]:
+        """存档坐标要钳回屏幕内：拔掉副屏后球会永久看不见，也就再也点不回来。"""
         if self.settings.float_ball_pos:
-            return self.settings.float_ball_pos
+            x, y = self.settings.float_ball_pos
+            return _clamped(x, y, BALL, BALL)
         screen = QApplication.primaryScreen().availableGeometry()
         return screen.right() - BALL - 24, screen.bottom() - BALL - 120
 
@@ -334,7 +416,8 @@ class MainWindow(QMainWindow):
         self.panel.show()
 
     def _place_panel(self) -> None:
-        screen = QApplication.primaryScreen().availableGeometry()
+        # 用屏幕并集而不是主屏：球可以合法地待在副屏上，只认主屏会把面板拽回主屏
+        screen = _usable_rect()
         self.panel.adjustSize()
         pw, ph = self.panel.width(), self.panel.height()
         x = self.ball.x() - pw - 10
@@ -386,6 +469,7 @@ class MainWindow(QMainWindow):
         self.settings.window_geometry = {
             "x": self.x(), "y": self.y(), "w": self.width(), "h": self.height(),
             "maximized": self.isMaximized(),
+            "splitter": list(self.splitter.sizes()),
         }
         self.settings.selected_task_id = (
             self.list.current_task().id if self.list.current_task() else None
@@ -394,11 +478,15 @@ class MainWindow(QMainWindow):
 
     def _restore_geometry(self) -> None:
         g = self.settings.window_geometry
-        if not g:
-            return
-        self.setGeometry(g.get("x", 80), g.get("y", 80),
-                         max(g.get("w", 1060), 720), max(g.get("h", 680), 480))
-        if g.get("maximized"):
+        screen = _usable_rect()
+        if g:
+            w = min(max(g.get("w", 1060), 720), max(screen.width(), 720))
+            h = min(max(g.get("h", 800), 480), max(screen.height(), 480))
+            self.setGeometry(*_clamped(g.get("x", 80), g.get("y", 80), w, h), w, h)
+            sizes = g.get("splitter")
+            if sizes and len(sizes) == 2 and sum(sizes) > 0:
+                self.splitter.setSizes(sizes)
+        if g and g.get("maximized"):
             self.showMaximized()
 
     def _sync_detail(self) -> None:

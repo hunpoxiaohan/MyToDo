@@ -13,9 +13,18 @@ from ..core.models import Task
 ROLE_TASK = Qt.UserRole          # Task 对象
 ROLE_RESULT = Qt.UserRole + 1    # PriorityResult
 ROLE_OWNER = Qt.UserRole + 2     # 负责人姓名
+ROLE_SUB = Qt.UserRole + 3       # 副行文案（负责人 · 剩余时间 · 子任务进度）
 
 ROW_H = 58
 RADIUS = 12
+
+
+def subline(task: Task, result: priority.PriorityResult, owner: str) -> str:
+    parts = [owner] if owner else []
+    parts.append(priority.humanize_left(result.minutes_left))
+    if task.subtask_total:
+        parts.append(f"✓ {task.subtask_done}/{task.subtask_total}")
+    return " · ".join(parts)
 
 
 class TaskDelegate(QStyledItemDelegate):
@@ -45,7 +54,6 @@ class TaskDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option, index) -> None:
         task: Task = index.data(ROLE_TASK)
         result = index.data(ROLE_RESULT)
-        owner: str = index.data(ROLE_OWNER) or ""
         if task is None or result is None:
             return super().paint(painter, option, index)
 
@@ -98,13 +106,12 @@ class TaskDelegate(QStyledItemDelegate):
             painter.setPen(QColor(self.t.c("text_muted")))
             painter.drawLine(strike.topLeft(), strike.topRight())
 
-        # 副行：负责人 + 剩余时间
+        # 副行：负责人 + 剩余时间 + 子任务进度（文案在 load 里算好，便于测试）
         sub_font = QFont(self.t_font())
         sub_font.setPointSizeF(9)
         painter.setFont(sub_font)
         painter.setPen(QColor(self.t.c("text_muted")))
-        left_text = priority.humanize_left(result.minutes_left)
-        sub = f"{owner} · {left_text}" if owner else left_text
+        sub = index.data(ROLE_SUB) or ""
         painter.drawText(text_left, rect.top() + 28, title_w, 18, Qt.AlignLeft | Qt.AlignVCenter, sub)
 
         # 右侧：周期标记 + 星级
@@ -161,6 +168,7 @@ class TaskList(QListWidget):
             item.setData(ROLE_TASK, task)
             item.setData(ROLE_RESULT, result)
             item.setData(ROLE_OWNER, owner)
+            item.setData(ROLE_SUB, subline(task, result, owner))
             item.setSizeHint(QSize(0, ROW_H))
             self.addItem(item)
             if task.id == selected_id:

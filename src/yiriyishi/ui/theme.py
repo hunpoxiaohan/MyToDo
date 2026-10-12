@@ -135,14 +135,16 @@ def build_qss(t: Tokens) -> str:
     """柔和留白路线：大圆角 + 极浅描边 + 分组卡片，不靠阴影靠层次。"""
     c = t.c
     accent_hover = _mix(c("accent"), c("text"), 0.14)
+    overdue_bg = _mix(c("surface"), c("danger"), 0.10)
     return f"""
 QWidget {{ background:{c('bg')}; color:{c('text')}; font-size:13px; }}
 QMainWindow, QDialog {{ background:{c('bg')}; }}
 
-#Card, #ToastBanner {{
+#Card, #ToastBanner, #OverdueBanner {{
     background:{c('surface')}; border:1px solid {c('border')}; border-radius:14px;
 }}
 #ToastBanner {{ border:1px solid {c('hover')}; }}
+#OverdueBanner {{ background:{overdue_bg}; border:1px solid {c('danger')}; }}
 /* FloatPanel 的卡片由 float_panel.paintEvent 自己画：顶层透明窗口靠样式表会画不出底色 */
 
 QLabel {{ background:transparent; }}
@@ -225,6 +227,29 @@ QGroupBox::title {{
     color:{c('text_muted')}; font-size:12px; padding:0 10px; margin:0;
 }}
 #RowDone:hover {{ background:{c('accent')}; border:1px solid {c('accent')}; color:{c('accent_text')}; }}
+
+/* ---------- 详情：备注 / 记录 Tab ---------- */
+QTabWidget#NotesTab::pane {{
+    background:{c('surface')}; border:1px solid {c('border')}; border-radius:12px;
+}}
+QTabBar::tab {{
+    background:transparent; color:{c('text_muted')}; border:none; margin:0;
+    padding:5px 12px; border-radius:9px; font-size:12px;
+}}
+QTabBar::tab:selected {{ background:{c('accent_soft')}; color:{c('text')}; font-weight:600; }}
+
+/* ---------- 记录时间线 ---------- */
+#NoteList {{ background:transparent; border:none; }}
+#NoteRow {{ background:{c('surface_alt')}; border:1px solid transparent; border-radius:10px; }}
+#NoteRow:hover {{ background:{c('hover')}; border:1px solid {c('accent_soft')}; }}
+#NoteBody {{ background:transparent; border:none; }}
+#NoteAction, #NoteDelete {{
+    background:transparent; border:1px solid {c('border')}; border-radius:8px;
+    color:{c('text_muted')}; font-size:11px; padding:0; min-width:26px; min-height:20px;
+}}
+#NoteAction:hover {{ background:{c('accent')}; border:1px solid {c('accent')}; color:{c('accent_text')}; }}
+#NoteDelete:hover {{ background:{c('danger')}; border:1px solid {c('danger')}; color:{c('accent_text')}; }}
+#NoteEditor {{ border-radius:8px; padding:4px 8px; }}
 
 /* ---------- 滚动条 / 菜单 / 提示 ---------- */
 QScrollBar:vertical {{ background:transparent; width:9px; margin:2px; }}
