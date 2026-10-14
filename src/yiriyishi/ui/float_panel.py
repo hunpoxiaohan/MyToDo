@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import (
@@ -125,7 +127,7 @@ class FloatPanel(QFrame):
     """
 
     task_activated = Signal(str)
-    task_completed = Signal(str)
+    status_menu_requested = Signal(str, QPoint)
     new_requested = Signal()
     open_main_requested = Signal()
     dismiss = Signal()
@@ -245,9 +247,11 @@ class FloatPanel(QFrame):
         done = QPushButton("完成")
         done.setObjectName("RowDone")
         done.setFixedHeight(24)
-        done.setToolTip("就地完成；周期任务自动滚到下一期")
+        done.setToolTip("改状态前先确认一遍：点这里只弹菜单")
         done.setCursor(Qt.CursorShape.PointingHandCursor)
-        done.clicked.connect(lambda _=False, tid=task.id: self.task_completed.emit(tid))
+        done.clicked.connect(
+            lambda _=False, b=done, tid=task.id: self.status_menu_requested.emit(
+                tid, b.mapToGlobal(b.rect().bottomLeft())))
 
         # 面板宽度固定：按可用像素省略号截断，而不是按字数——否则中文会被按钮切成半个字
         avail = (PANEL_WIDTH - 28 - 16 - 9 - 16 - done.sizeHint().width())
@@ -266,8 +270,11 @@ class FloatPanel(QFrame):
         title.setStyleSheet(f"color:{self.t.c('text')};")
         title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         box.addWidget(title)
-        left = priority.humanize_left(result.minutes_left)
-        meta = f"{owner} · {left}" if owner else left
+        # 面板沿用主列表那一套短日期语法；倒计时只留在通知文案里
+        when = priority.format_due(task.effective_due(), datetime.now()) or "未排期"
+        parts = [owner, when,
+                 f"{task.subtask_done}/{task.subtask_total}" if task.subtask_total else ""]
+        meta = " · ".join(p for p in parts if p)
         label = QLabel(QFontMetrics(meta_font).elidedText(
             meta, Qt.TextElideMode.ElideRight, avail))
         label.setObjectName("Muted")

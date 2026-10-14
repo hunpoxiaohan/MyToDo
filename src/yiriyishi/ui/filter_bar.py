@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout,
 )
@@ -69,7 +70,25 @@ class FilterBar(QFrame):
         )
         tools.addWidget(self.sort)
         root.addLayout(tools)
+        self._reserve_chip_widths()
         self._pick(None)
+
+    def _reserve_chip_widths(self) -> None:
+        """每个 chip 先占好最宽文案的位置。
+
+        条数跟着 30 秒一次的 reload 变，文案一长一短整行就左右跳格；选中态还是粗体，
+        比常规更宽，所以按「文案 + 三位数 + 粗体」量。
+        """
+        bold = QFont(self.font())
+        bold.setBold(True)
+        for key, btn in self._chips.items():
+            label = "全部" if key is None else BUCKET_LABELS[key]
+            btn.setFont(bold)
+            btn.setText(f"{label} 888")
+            btn.ensurePolished()
+            btn.setMinimumWidth(btn.sizeHint().width())
+            btn.setText(label)
+            btn.setFont(self.font())
 
     def set_categories(self, counts: dict[Bucket, int]) -> None:
         """把每个分类的条数写进 chip 文案，节简界面无需额外统计区。"""

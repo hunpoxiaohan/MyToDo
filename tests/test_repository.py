@@ -503,3 +503,47 @@ def test_rolling_leaves_the_finished_period_subtasks_alone(repo):
     assert repo.get(child.id).parent_id == parent.id
     assert repo.get(child.id).due_time == datetime(2026, 10, 9, 10)
     assert len(repo.subtasks(rolled.id)) == 1
+
+
+def test_subtasks_leave_archived_kids_out(repo):
+    """树上画出来的子行必须和父行的 1/2 对得上，归档的那条两边都不算。"""
+    parent = repo.create(title="搬新家")
+    repo.create(title="打包书房", parent_id=parent.id)
+    repo.create(title="旧物处理", parent_id=parent.id, status=STATUS_ARCHIVED)
+
+    assert [t.title for t in repo.subtasks(parent.id)] == ["打包书房"]
+    assert repo.subtask_counts()[parent.id] == (0, 1)
+
+
+# ---------------- 状态：误点完成之后要能改回来 ----------------
+def test_reopen_turns_a_done_task_back_into_todo(repo, now):
+    task = repo.create(title="交房租")
+    complete_and_roll(repo, task, now)
+    repo.reopen(task.id)
+    back = repo.get(task.id)
+    assert back.status == STATUS_TODO
+    assert back.completed_at is None
+
+
+def test_reopen_on_an_open_task_is_a_no_op(repo):
+    task = repo.create(title="还没做")
+    repo.reopen(task.id)
+    assert repo.get(task.id).status == STATUS_TODO
+
+
+def test_reopen_takes_back_the_period_that_completion_rolled(repo, now):
+    """滚出来的下一期是那次误点的产物：拉回当期时得一并收掉，否则库里留一条幽灵。"""
+    task = repo.create(title="交房租", due_time=now, recurrence="daily")
+    rolled = complete_and_roll(repo, task, now)
+    assert rolled is not None
+    repo.reopen(task.id)
+    assert repo.get(rolled.id) is None
+    assert repo.get(task.id).status == STATUS_TODO
+
+
+def test_reopen_keeps_the_rolled_subtasks_deleted_too(repo, now):
+    task = repo.create(title="搬新家", due_time=now, recurrence="daily")
+    repo.create(title="打包书房", parent_id=task.id)
+    rolled = complete_and_roll(repo, task, now)
+    repo.reopen(task.id)
+    assert repo.subtasks(rolled.id) == []

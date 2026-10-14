@@ -18,7 +18,8 @@ from yiriyishi.ui.float_panel import FloatBall, FloatPanel
 from yiriyishi.ui.main_window import MainWindow
 from yiriyishi.ui.note_timeline import ROLE_DAY, ROLE_NOTE
 from yiriyishi.ui.task_form import OwnerCombo, TaskForm
-from yiriyishi.ui.task_list import ROLE_RESULT, ROLE_TASK, TaskList
+from yiriyishi.ui.task_list import (ROLE_CHILD, ROLE_DUE, ROLE_PROGRESS, ROLE_RESULT,
+                                    ROLE_TASK)
 from yiriyishi.ui.theme import refresh_tokens, resolve_mode, tokens
 
 pytestmark = pytest.mark.gui
@@ -52,12 +53,21 @@ def _repo(window) -> TaskRepository:
     return TaskRepository(window.conn)
 
 
+def _visible(window):
+    """界面上看得见的行：父任务，加上已展开父行的子任务，顺序就是渲染顺序。"""
+    return [index.data(ROLE_TASK) for index in window.list.visible_rows()]
+
+
+def _titles(window):
+    return [task.title for task in _visible(window)]
+
+
 def test_main_window_builds_and_lists_tasks(qapp, window):
     repo = _repo(window)
     repo.create(title="今天的活", due_time=datetime.now() + timedelta(minutes=10))
     repo.create(title="下周的活", due_time=datetime.now() + timedelta(days=8))
     window.reload()
-    assert window.list.count() == 2
+    assert len(_visible(window)) == 2
     assert "待办 2" in window.status_label.text()
 
 
@@ -66,7 +76,7 @@ def test_list_is_ordered_by_computed_priority(qapp, window):
     repo.create(title="遥远", due_time=datetime.now() + timedelta(days=30))
     repo.create(title="马上", due_time=datetime.now() + timedelta(minutes=5))
     window.reload()
-    titles = [window.list.item(i).data(ROLE_TASK).title for i in range(window.list.count())]
+    titles = _titles(window)
     assert titles == ["马上", "遥远"]
 
 
@@ -75,7 +85,7 @@ def test_low_priority_task_due_in_one_hour_is_warning_yellow(qapp, window):
     repo = _repo(window)
     repo.create(title="一小时内", due_time=datetime.now() + timedelta(minutes=60), importance=1)
     window.reload()
-    result = window.list.item(0).data(ROLE_RESULT)
+    result = window.list.data_at(0, ROLE_RESULT)
     assert result.level is Level.WARNING
     assert window.t.level(result.level.value) == "#F39C12"
 
@@ -86,10 +96,10 @@ def test_category_filter_narrows_the_list(qapp, window):
     repo.create(title="未来B", due_time=datetime.now() + timedelta(days=9))
     window.reload()
     window._on_category(Bucket.TODAY)
-    titles = [window.list.item(i).data(ROLE_TASK).title for i in range(window.list.count())]
+    titles = _titles(window)
     assert titles == ["今日A"]
     window._on_category(None)
-    assert window.list.count() == 2
+    assert len(_visible(window)) == 2
 
 
 def test_chip_labels_carry_counts(qapp, window):
@@ -100,13 +110,32 @@ def test_chip_labels_carry_counts(qapp, window):
     assert any(t.startswith("逾期 1") for t in texts)
 
 
+def test_chips_hold_their_width_as_counts_change(qapp, window):
+    """条数逢 reload 就进一位，chip 一跟着文案变宽，整行筛选器就集体跳格。"""
+    window.show()
+    qapp.processEvents()
+    btn = window.filter._chips[Bucket.TODAY]
+
+    def effective_width():
+        # 布局真正用的宽度：没有预留时就是文案自己的 sizeHint
+        return max(btn.sizeHint().width(), btn.minimumWidth())
+
+    window.filter.set_categories({Bucket.TODAY: 0})
+    qapp.processEvents()
+    no_count = effective_width()
+    window.filter.set_categories({Bucket.TODAY: 12})
+    qapp.processEvents()
+    two_digits = effective_width()
+    assert two_digits == no_count, f"条数 0 → 12，chip 宽度 {no_count} → {two_digits}"
+
+
 def test_search_filters_by_title(qapp, window):
     repo = _repo(window)
     repo.create(title="整理相册")
     repo.create(title="整理桌面")
     window.reload()
     window._on_search("相册")
-    assert window.list.count() == 1
+    assert len(_visible(window)) == 1
 
 
 def test_owner_filter_and_combo(qapp, window):
@@ -117,9 +146,9 @@ def test_owner_filter_and_combo(qapp, window):
     repo.create(title="无主的活")
     window.reload()
     window._on_owner(zhang.id)
-    assert window.list.count() == 1
+    assert len(_visible(window)) == 1
     window._on_owner(None)
-    assert window.list.count() == 2
+    assert len(_visible(window)) == 2
 
 
 def test_clicking_list_row_fills_the_detail_form(qapp, window):
@@ -437,6 +466,24 @@ def test_qss_selectors_all_match_a_widget_name(qapp):
         for sel in re.findall(r"\b(Q\w+)", part):
             assert sel in known_classes, f"QSS 选择了不存在的控件类型 {sel}"
 
+
+def test_dropdown_fields_advertise_their_arrow(qapp):
+    """下拉框一旦没有箭头就扁得像只读文本；箭头只能靠素材画，素材路径必须真实存在。"""
+    import re
+    from pathlib import Path
+
+    from yiriyishi.ui.theme import build_qss
+
+    for mode in ("light", "dark"):
+        body = build_qss(tokens(mode))
+        rules = re.findall(r"::down-arrow \{([^}]*)\}", body)
+        assert rules, f"{mode} 主题没画下拉箭头"
+        for rule in rules:
+            m = re.search(r'image:\s*url\("?([^")]+)"?\)', rule)
+            assert m, f"{mode} 主题的 ::down-arrow 没有素材: {rule}"
+            assert Path(m.group(1)).exists(), f"{mode} 箭头素材缺失: {m.group(1)}"
+
+
 def test_float_windows_only_transparent_outside_their_shape(qapp, window):
     """形状之外可以透明（边缘要靠 alpha 抗锯齿），但那部分必须被 mask 排除，
     否则就是「看不见的区域照样吞点击与滚轮」。"""
@@ -521,7 +568,7 @@ def test_new_task_dialog_opens_and_saves(qapp, window):
     assert len(shown) == 1
     assert not shown[0].isVisible(), "保存后对话框应当关闭"
     assert [t.title for t in _repo(window).list()] == ["对话框新建"]
-    assert window.list.count() == 1, "保存后主列表要刷新"
+    assert len(_visible(window)) == 1, "保存后主列表要刷新"
 
 
 def test_task_dialog_completes_and_rolls(qapp, window):
@@ -589,6 +636,27 @@ def test_task_form_fits_both_of_its_containers(qapp, window):
         f"对话框 {dlg.width()}x{dlg.height()} 装不下表单 {need.width()}x{need.height()}，底部按钮会被裁掉")
 
 
+def test_edit_buttons_read_like_the_settings_dialog(qapp, window):
+    """两处编辑界面应当同一种读法：取消收在最右，删除躲开确认动作。
+
+    原来 保存|完成|删除 挤成一排、「取消」孤零零飘在最右——误点删除就当场没了。
+    """
+    from yiriyishi.ui.task_form import TaskDialog
+
+    task = _repo(window).create(title="待办甲")
+    dlg = TaskDialog(window.t, window.task_repo, window.person_repo, task, window)
+    dlg.show()
+    qapp.processEvents()
+
+    left_to_right = sorted((dlg.form.delete_btn, dlg.form.save_btn,
+                            dlg.form.complete_btn, dlg.form.cancel_btn),
+                           key=lambda b: b.x())
+    assert left_to_right == [dlg.form.delete_btn, dlg.form.save_btn,
+                             dlg.form.complete_btn, dlg.form.cancel_btn]
+    gap = dlg.form.save_btn.x() - dlg.form.delete_btn.geometry().right()
+    assert gap >= 20, f"删除与确认动作之间只空 {gap}px，一不留神就点错"
+
+
 def test_settings_dialog_fits_chinese_and_persists(qapp, window, monkeypatch):
     """设置窗三件事：内容别被裁掉「确定」、按钮别是英文 OK/Cancel、改了要落盘。"""
     from PySide6.QtWidgets import QDialogButtonBox
@@ -641,10 +709,11 @@ def test_form_field_columns_line_up(qapp, window, monkeypatch):
     task = TaskDialog(window.t, window.task_repo, window.person_repo, None, window)
     task.show()
     qapp.processEvents()
-    quick = next(b for b in task.findChildren(QPushButton) if b.text() == "今天 18:00")
     task_fields = {
         "标题": task.form.title_edit, "负责人": task.form.owner,
-        "完成时间": task.form.due_enable, "快捷时间": quick,
+        # 只量每行第一个控件：胶囊行里的「今天 18:00」本就不在字段列上，
+        # 「具体时间」的日期控件默认藏着，没布局，量了也是 0
+        "完成时间": task.form.due_none,
         "周期": task.form.recurrence, "重要度": task.form.importance,
         "提前提醒": task.form.reminder,
     }
@@ -686,11 +755,10 @@ def test_real_click_on_row_loads_detail_and_survives_refresh(qapp, window):
     window.show()
     qapp.processEvents()
 
-    row = window.list.item(0)
-    assert row.data(ROLE_TASK).id == task.id
+    assert window.list.task_at(0).id == task.id
     QTest.mouseClick(window.list.viewport(), Qt.MouseButton.LeftButton,
                      Qt.KeyboardModifier.NoModifier,
-                     window.list.visualItemRect(row).center())
+                     window.list.row_rect(0).center())
     qapp.processEvents()
 
     assert window.list.currentRow() == 0, "真实点击没选中行"
@@ -763,29 +831,87 @@ def _buttons(row, name):
     return [b for b in row.findChildren(QPushButton) if b.objectName() == name]
 
 
-def test_note_tab_only_exists_in_the_detail_panel(qapp, window):
-    """新任务对话框里任务还不存在，记录 Tab 必须整个不出现，而不是显示一个空壳。"""
+# ---------------- 详情面板：时间用四枚胶囊单选 ----------------
+def test_the_four_due_capsules_are_the_only_time_switch(qapp, window):
+    """不再有「有截止时间」勾选框 + 三个快捷按钮那一堆：四枚胶囊就是全部。"""
+    form = TaskForm(window.t, _repo(window), PersonRepository(window.conn))
+    assert [b.text() for b in (form.due_none, form.due_today,
+                               form.due_tomorrow, form.due_custom)] == [
+        "无", "今天 18:00", "明天 09:00", "自定义…"]
+    assert not hasattr(form, "due_enable")
+    assert form.due_edit.isHidden(), "只有选了自定义才该露出日期时间控件"
+
+
+def test_each_capsule_maps_to_the_expected_due_time(qapp, window):
+    repo = _repo(window)
+    form = TaskForm(window.t, repo, PersonRepository(window.conn))
+    saved = []
+    form.saved.connect(saved.append)
+    now = datetime.now()
+
+    form.due_today.click()
+    form.title_edit.setText("甲")
+    assert form.commit()
+    today_six = repo.get(saved[-1]).due_time
+    assert (today_six.date(), today_six.hour, today_six.minute) == (now.date(), 18, 0)
+
+    form.due_tomorrow.click()
+    assert form.commit()
+    tomorrow_nine = repo.get(saved[-1]).due_time
+    assert (tomorrow_nine.date(), tomorrow_nine.hour) == (now.date() + timedelta(days=1), 9)
+
+    form.due_none.click()
+    assert form.commit()
+    assert repo.get(saved[-1]).due_time is None
+
+    form.due_custom.click()
+    assert not form.due_edit.isHidden()
+    form.due_edit.setDateTime(datetime(2026, 12, 24, 20, 30))
+    assert form.commit()
+    assert repo.get(saved[-1]).due_time == datetime(2026, 12, 24, 20, 30)
+
+
+def test_loading_a_task_lights_the_matching_capsule(qapp, window):
+    repo = _repo(window)
+    form = TaskForm(window.t, repo, PersonRepository(window.conn))
+    now = datetime.now()
+
+    form.load_task(repo.create(title="无期"))
+    assert form.due_none.isChecked()
+
+    form.load_task(repo.create(title="今天", due_time=now.replace(hour=18, minute=0,
+                                                                 second=0, microsecond=0)))
+    assert form.due_today.isChecked()
+
+    other = repo.create(title="别的时间", due_time=now.replace(hour=7, minute=45,
+                                                              second=0, microsecond=0))
+    form.load_task(other)
+    assert form.due_custom.isChecked()
+    assert form.due_edit.dateTime().toPython().replace(microsecond=0) == other.due_time
+
+
+def test_note_and_records_are_stacked_not_tabbed(qapp, window):
+    """备注和记录同屏可见：藏在第二个 Tab 里等于没有。"""
     from PySide6.QtWidgets import QTabWidget
 
     from yiriyishi.ui.task_form import TaskDialog
 
-    assert isinstance(window.detail.notes_tab, QTabWidget)
-    assert window.detail.notes_tab.tabText(0) == "备注"
-    assert window.detail.notes_tab.tabText(1).startswith("记录")
+    assert window.detail.findChild(QTabWidget) is None
+    assert not window.detail.note_edit.isHidden() and not window.detail.notes.isHidden()
 
     dlg = TaskDialog(window.t, window.task_repo, window.person_repo, None, window)
-    assert dlg.form.findChild(QTabWidget) is None, "新任务对话框不该带记录 Tab"
+    assert dlg.form.findChild(QTabWidget) is None, "任务还不存在，新任务对话框不该带记录区"
     dlg.deleteLater()
 
 
-def test_tab_title_carries_record_count(qapp, window):
+def test_the_records_label_carries_the_count(qapp, window):
     task = _repo(window).create(title="有记录的任务")
     notes = _note_repo(window)
     notes.add(task.id, "第一条")
     notes.add(task.id, "第二条")
     window.focus_task(task.id)
     qapp.processEvents()
-    assert window.detail.notes_tab.tabText(1) == "记录(2)"
+    assert window.detail.records_label.text() == "记录 · 2"
 
 
 def test_timeline_groups_entries_by_day_newest_day_first(qapp, window):
@@ -833,7 +959,7 @@ def test_ctrl_enter_records_a_note_right_now(qapp, window):
     assert tl.list.item(0).text() == "今天"
     assert tl.list.item(1).data(ROLE_NOTE).body == "刚发现接口换了字段"
     assert tl.input.toPlainText() == ""
-    assert window.detail.notes_tab.tabText(1) == "记录(1)"
+    assert window.detail.records_label.text() == "记录 · 1"
 
 
 def test_blank_input_records_nothing(qapp, window):
@@ -888,7 +1014,6 @@ def test_double_click_edits_in_place_and_keeps_the_original_time(qapp, window):
     qapp.processEvents()
 
     tl = window.detail.notes
-    window.detail.notes_tab.setCurrentIndex(1)   # 记录页要真的看得见，鼠标事件才落得到行上
     window.resize(1120, 720)
     window.show()
     qapp.processEvents()
@@ -945,7 +1070,7 @@ def test_switching_tasks_swaps_the_records(qapp, window):
     qapp.processEvents()
     bodies = [t for k, t in _timeline_lines(window.detail.notes) if k == "note"]
     assert bodies == ["乙的另一条", "乙的记录"]
-    assert window.detail.notes_tab.tabText(1) == "记录(2)"
+    assert window.detail.records_label.text() == "记录 · 2"
 
 
 # ---------------- 窗口缩放：详情面板滚动 / 分栏与几何恢复 ----------------
@@ -1135,58 +1260,155 @@ def test_clicking_the_review_notification_opens_the_overdue_filter(qapp, window)
     repo.create(title="逾期甲", due_time=datetime.now() - timedelta(hours=5))
     repo.create(title="未来丙", due_time=datetime.now() + timedelta(days=3))
     window.focus_task(REVIEW_TARGET)
-    titles = [window.list.item(i).data(ROLE_TASK).title for i in range(window.list.count())]
+    titles = _titles(window)
     assert titles == ["逾期甲"]
 
 
-# ---------------- 子任务：详情面板的「子任务」Tab ----------------
-def test_detail_panel_lists_subtasks_and_reports_progress(qapp, window):
+# ---------------- 子任务：主列表就是那棵树 ----------------
+def test_children_hang_under_their_parent_row(qapp, window):
+    """子任务不再藏在详情面板的 Tab 里 —— 打开父行就能看见。"""
+    repo = _repo(window)
+    parent = repo.create(title="搬家")
+    kid = repo.create(title="打包书房", parent_id=parent.id)
+    repo.create(title="旧物处理", parent_id=parent.id, status="archived")
+    window.reload()
+    assert _titles(window) == ["搬家", "打包书房"]
+    assert window.list.data_at(0, ROLE_PROGRESS) == "0/1"
+    assert window.list.data_at(1, ROLE_CHILD) is True
+    assert window.list.row_of_task(kid.id) == 1
+
+
+def test_parent_row_carries_progress_and_rolls_up_the_earliest_child_date(qapp, window):
+    """父行的颜色跟着最早那个未完成子任务走，日期也一起滚上来。"""
+    from yiriyishi.core.priority import format_due
+
+    repo = _repo(window)
+    parent = repo.create(title="搬家", due_time=datetime.now() + timedelta(days=9))
+    repo.create(title="打包书房", parent_id=parent.id,
+                due_time=datetime.now() + timedelta(minutes=30))
+    window.reload()
+    assert window.list.data_at(0, ROLE_PROGRESS) == "0/1"
+    assert window.list.data_at(0, ROLE_DUE) == format_due(
+        window.list.task_at(0).effective_due(), datetime.now())
+
+
+def test_collapsing_a_parent_hides_its_children_and_survives_reload(qapp, window):
     repo = _repo(window)
     parent = repo.create(title="搬家")
     repo.create(title="打包书房", parent_id=parent.id)
-    repo.create(title="退租", parent_id=parent.id, status="done")
     window.reload()
-    assert window.list.select_task(parent.id)
-    panel = window.detail.subtasks
-    assert panel.titles() == ["打包书房", "退租"]
-    assert panel.progress_label.text() == "1/2"
+    index = window.list.model_.index_for(parent.id)
+    window.list.setExpanded(index, False)
+    assert _titles(window) == ["搬家"]
+    window.reload()
+    assert _titles(window) == ["搬家"], "定时刷新把折叠状态打回了原形"
 
 
-def test_checking_a_subtask_finishes_it_but_not_the_parent(qapp, window):
-    """父任务永远手动完成：勾完最后一项，它还得留在待办里。"""
+def test_clicking_a_rows_head_circle_asks_for_a_status_menu(qapp, window, monkeypatch):
+    """点圈就落库的话误点没法挽回：圆圈只把状态菜单请出来，选了哪条才改哪条。
+
+    父行与子行同理——父任务永远手动收，靠的是菜单里那一下显式选择。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from yiriyishi.ui.task_list import TaskDelegate
+
     repo = _repo(window)
     parent = repo.create(title="搬家")
-    child = repo.create(title="打包书房", parent_id=parent.id)
+    kid = repo.create(title="打包书房", parent_id=parent.id)
+    window.resize(1120, 720)
+    window.show()
+    qapp.processEvents()
     window.reload()
-    window.list.select_task(parent.id)
-    panel = window.detail.subtasks
-    panel.set_checked(0, True)
-    assert repo.get(child.id).status == "done"
+    qapp.processEvents()
+
+    asked = []
+    # 模态菜单的 exec() 会把 offscreen 测试钉死，所以只看它把哪个任务请了出来
+    monkeypatch.setattr(window, "_ask_status", lambda tid, pos: asked.append(tid))
+    box = window.list.row_rect(1)
+    circle = TaskDelegate.circle_rect(box, window.list.visible_rows()[1])
+    QTest.mouseClick(window.list.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, circle.center())
+    qapp.processEvents()
+    assert asked == [kid.id]
+    assert repo.get(kid.id).status == "todo", "点一下圈就把子任务做完了"
     assert repo.get(parent.id).status == "todo"
-    assert panel.progress_label.text() == "1/1"
 
 
-def test_deleting_a_subtask_row_removes_it(qapp, window):
+def test_status_menu_offers_exactly_the_reverse_of_the_rows_state(qapp, window):
+    """菜单里同时摆「完成」和「重新打开」，用户得先判断这行现在是啥状态。"""
+    repo = _repo(window)
+    open_task = repo.create(title="交房租")
+    done_task = repo.create(title="退掉租约")
+    window.complete_task(done_task.id)
+
+    assert [a.text() for a in window._status_menu(open_task).actions()] == ["标记完成"]
+    # 完成动作写的是库里那份，本地对象还停在旧状态，得重新读一条
+    assert [a.text() for a in
+            window._status_menu(repo.get(done_task.id)).actions()] == ["重新打开"]
+
+
+def test_picking_reopen_from_the_menu_puts_the_row_back_to_todo(qapp, window):
+    """误点完成之后，同一颗圈就是出口。"""
+    repo = _repo(window)
+    task = repo.create(title="交房租")
+    window.complete_task(task.id)
+    assert repo.get(task.id).status == "done"
+    window.reopen_task(task.id)
+    assert repo.get(task.id).status == "todo"
+
+
+def test_panel_check_asks_before_changing_state(qapp, window, monkeypatch):
+    """悬浮面板那颗 ✓ 不能是个直接落库的快捷键。"""
+    from PySide6.QtWidgets import QPushButton
+
+    repo = _repo(window)
+    task = repo.create(title="交房租", due_time=datetime.now())
+    window.set_ball_visible(True, persist=False)
+    window._toggle_panel(True)
+    window.reload()
+    qapp.processEvents()
+
+    asked = []
+    monkeypatch.setattr(window, "_ask_status", lambda tid, pos: asked.append(tid))
+    box = window.panel.findChildren(QPushButton, "RowDone")
+    assert box, "面板里没有行内完成按钮了"
+    box[0].click()
+    assert asked == [task.id]
+    assert repo.get(task.id).status == "todo"
+    window._toggle_panel(False)
+
+
+def test_double_click_on_a_child_row_opens_that_child(qapp, window, monkeypatch):
+    """双击落在哪一行就开哪一行，子任务行也不例外。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
     repo = _repo(window)
     parent = repo.create(title="搬家")
-    child = repo.create(title="打包书房", parent_id=parent.id)
+    kid = repo.create(title="打包书房", parent_id=parent.id)
+    # open_task_edit 里是模态 exec()，offscreen 下会把测试钉死，所以只看它收到什么
+    opened = []
+    monkeypatch.setattr(window, "open_task_edit", opened.append)
+    window.resize(1120, 720)
+    window.show()
+    qapp.processEvents()
     window.reload()
-    window.list.select_task(parent.id)
-    panel = window.detail.subtasks
-    panel.delete_row(0)
-    assert repo.get(child.id) is None
-    assert panel.titles() == []
+    qapp.processEvents()
+
+    QTest.mouseDClick(window.list.viewport(), Qt.MouseButton.LeftButton,
+                      Qt.KeyboardModifier.NoModifier,
+                      window.list.row_rect(1).center())
+    assert opened == [kid.id]
 
 
-def test_adding_a_subtask_asks_for_a_dialog_preset_with_the_parent(qapp, window, monkeypatch):
+def test_adding_a_subtask_from_the_parent_row_presets_the_parent(qapp, window, monkeypatch):
     repo = _repo(window)
     parent = repo.create(title="搬家")
     window.reload()
-    window.list.select_task(parent.id)
-    # open_new_subtask 里是模态 exec()，offscreen 下会把测试钉死，所以只看它收到什么
     opened = []
     monkeypatch.setattr(window, "open_new_subtask", opened.append)
-    window.detail.subtasks.add_btn.click()
+    window.list.add_subtask_requested.emit(parent.id)
     assert opened == [parent.id]
 
 
@@ -1208,13 +1430,14 @@ def test_subtask_dialog_hides_recurrence_and_keeps_the_parent(qapp, window):
     assert child.recurrence is None
 
 
-def test_a_subtask_reminder_focuses_its_parent_row(qapp, window):
-    """通知里点子任务，主列表却没有这一行 —— 必须落到父任务上。"""
+def test_a_subtask_reminder_focuses_its_own_row(qapp, window):
+    """通知里点子任务，树上就有这一行 —— 直接选中它，不用再绕到父任务。"""
     repo = _repo(window)
     parent = repo.create(title="搬家")
     child = repo.create(title="打包书房", parent_id=parent.id)
     window.focus_task(child.id)
-    assert window.list.current_task().id == parent.id
+    assert window.list.current_task().id == child.id
+    assert window.list.data_at(window.list.row_of_task(child.id), ROLE_CHILD) is True
 
 
 # ---------------- 逾期横幅：一键顺延 ----------------
@@ -1265,6 +1488,18 @@ def test_postpone_all_clears_every_overdue_task(qapp, window):
     assert jia.postponed_until == target.replace(microsecond=0)
 
 
+def test_postpone_confirmation_uses_the_same_date_grammar_as_the_rows(qapp, window):
+    """按钮写「明天 09:00」、回执写 10-13 09:00：同一件事两种说法，用户得自己换算。"""
+    repo = _repo(window)
+    repo.create(title="逾期甲", due_time=datetime.now() - timedelta(hours=5))
+    window.reload()
+
+    tomorrow = (datetime.now() + timedelta(days=1)).replace(
+        hour=9, minute=0, second=0, microsecond=0)
+    window.postpone_all_overdue(tomorrow)
+    assert window.toast.text.text() == "已把 1 项顺延到 明天 09:00"
+
+
 def test_dismissing_the_overdue_banner_keeps_it_hidden(qapp, window):
     repo = _repo(window)
     repo.create(title="逾期甲", due_time=datetime.now() - timedelta(hours=5))
@@ -1275,23 +1510,18 @@ def test_dismissing_the_overdue_banner_keeps_it_hidden(qapp, window):
     assert window.overdue_banner.isHidden(), "本次运行内别再弹回来"
 
 
-# ---------------- 子任务：主列表只显父行，副行带进度 ----------------
-def test_parent_row_shows_subtask_progress_in_its_subline(qapp, window):
-    """「只显父行 + 进度」：进度是子任务在主列表里唯一的露面方式。"""
-    from yiriyishi.ui.task_list import ROLE_SUB
-
+# ---------------- 子任务：父行进度 + 子行日期 ----------------
+def test_the_parent_row_carries_progress_and_the_child_rows_do_not(qapp, window):
+    """进度只在父行说话；子行有自己的日期，别再挂一份 1/2。"""
     repo = _repo(window)
     parent = repo.create(title="搬家")
     repo.create(title="打包书房", parent_id=parent.id, status="done")
     repo.create(title="退租", parent_id=parent.id)
-    repo.create(title="买牛奶")
+    milk = repo.create(title="买牛奶")
     window.reload()
-    row = next(window.list.item(i) for i in range(window.list.count())
-               if window.list.item(i).data(ROLE_TASK).title == "搬家")
-    plain = next(window.list.item(i) for i in range(window.list.count())
-                 if window.list.item(i).data(ROLE_TASK).title == "买牛奶")
-    assert "✓ 1/2" in row.data(ROLE_SUB)
-    assert "✓" not in plain.data(ROLE_SUB)
+    row = window.list.row_of_task(parent.id)
+    assert window.list.data_at(row, ROLE_PROGRESS) == "1/2"
+    assert window.list.data_at(window.list.row_of_task(milk.id), ROLE_PROGRESS) in (None, "")
 
 
 def test_overdue_filter_includes_the_parent_of_a_late_subtask(qapp, window):
@@ -1303,5 +1533,5 @@ def test_overdue_filter_includes_the_parent_of_a_late_subtask(qapp, window):
     repo.create(title="打包书房", parent_id=parent.id,
                 due_time=datetime.now() - timedelta(hours=2))
     window.focus_task(REVIEW_TARGET)
-    titles = [window.list.item(i).data(ROLE_TASK).title for i in range(window.list.count())]
-    assert titles == ["搬家"]
+    # 父行靠 roll-up 上榜，迟到的子任务就挂在它下面
+    assert _titles(window) == ["搬家", "打包书房"]

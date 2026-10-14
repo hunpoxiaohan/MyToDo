@@ -4,15 +4,14 @@ from datetime import datetime, time, timedelta
 
 from PySide6.QtCore import Qt, QDate, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDialog, QFormLayout, QHBoxLayout,
-    QLineEdit, QPushButton, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDialog, QFormLayout,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..core.models import Person, Task, new_id
 from ..core.repository import PersonRepository, TaskRepository
 from ..core.recurrence import complete_and_roll
 from .note_timeline import NoteTimeline
-from .subtask_panel import SubTaskPanel
 from .theme import mono_font, ui_font
 
 RECURRENCE_OPTIONS = [
@@ -104,29 +103,32 @@ class TaskForm(QWidget):
         self.owner = OwnerCombo(person_repo.list())
         form.addRow("负责人", self.owner)
 
+        # 完成时间只有四枚胶囊：先勾「有截止时间」再挑快捷按钮再改控件，
+        # 那条路要先理解再动手，比四选一慢得多。
         due_row = QHBoxLayout()
-        self.due_enable = QPushButton("有截止时间")
-        self.due_enable.setCheckable(True)
-        self.due_enable.setChecked(True)
-        self.due_enable.toggled.connect(self._toggle_due)
+        self.due_none = QPushButton("无")
+        self.due_today = QPushButton("今天 18:00")
+        self.due_tomorrow = QPushButton("明天 09:00")
+        self.due_custom = QPushButton("自定义…")
+        self.due_group = QButtonGroup(self)
+        for index, capsule in enumerate((self.due_none, self.due_today,
+                                         self.due_tomorrow, self.due_custom)):
+            capsule.setObjectName("Capsule")
+            capsule.setCheckable(True)
+            self.due_group.addButton(capsule, index)
+            due_row.addWidget(capsule)
+        due_row.addStretch(1)
+        form.addRow("完成时间", _wrap(due_row))
+        self.due_group.idClicked.connect(self._apply_due_mode)
+
         self.due_edit = QDateTimeEdit()
         self.due_edit.setCalendarPopup(True)
         self.due_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.due_edit.setFont(mono_font(10))
         self.due_edit.setDateTime(datetime.now().replace(minute=0) + timedelta(hours=1))
-        due_row.addWidget(self.due_enable)
-        due_row.addWidget(self.due_edit, 1)
-        form.addRow("完成时间", _wrap(due_row))
-
-        # 快捷时间单独一行：和上面挤一行会要 800+px，比对话框和详情面板都宽
-        quick_row = QHBoxLayout()
-        for label, offset in (("今天 18:00", None), ("明天 09:00", 1), ("本周五", 2)):
-            btn = QPushButton(label)
-            btn.setObjectName("Ghost")
-            btn.clicked.connect(lambda _=False, spec=offset, text=label: self._quick_due(spec, text))
-            quick_row.addWidget(btn)
-        quick_row.addStretch(1)
-        form.addRow("", _wrap(quick_row))
+        self.due_edit.setVisible(False)
+        form.addRow("具体时间", self.due_edit)
+        self.due_today.setChecked(True)
 
         self.recurrence = QComboBox()
         for value, label in RECURRENCE_OPTIONS:
@@ -185,28 +187,30 @@ class TaskForm(QWidget):
 
         self.note_edit = QTextEdit()
         self.note_edit.setPlaceholderText("备注（支持粘贴，保留简单排版）")
-        self.note_edit.setMinimumHeight(96)
+        self.note_edit.setMinimumHeight(84)
+        root.addWidget(self.note_edit)
 
-        # 只有拿到笔记仓库（= 任务详情面板）才建 Tab：新任务对话框里任务还不存在，
-        # 记不了东西，多一个空 Tab 只会让人以为能记。
+        # 记录同屏摆在备注下面：藏进第二个 Tab 就等于没做，新任务对话框里
+        # 任务还不存在，记不了东西，这一整块干脆不建。
         self.notes = None
-        self.notes_tab = None
-        self.subtasks = None
+        self.records_label = None
         if note_repo is not None:
-            self.notes_tab = QTabWidget()
-            self.notes_tab.setObjectName("NotesTab")
-            self.notes_tab.addTab(self.note_edit, "备注")
+            self.records_label = QLabel("记录")
+            self.records_label.setObjectName("SectionTitle")
+            root.addWidget(self.records_label)
             self.notes = NoteTimeline(self.t, note_repo)
-            self.notes_tab.addTab(self.notes, "记录")
             self.notes.count_changed.connect(self._show_note_count)
-            # 子任务只在已有任务上成立，所以和新任务对话框一样走 note_repo 这道门
-            self.subtasks = SubTaskPanel(self.t, task_repo)
-            self.notes_tab.addTab(self.subtasks, "子任务")
-            root.addWidget(self.notes_tab, 1)
-        else:
-            root.addWidget(self.note_edit, 1)
+            root.addWidget(self.notes, 1)
 
+        # 按钮读法跟设置窗一致：删除单独撇在最左，确认动作成组靠右，取消收尾
         buttons = QHBoxLayout()
+        self.delete_btn = QPushButton("删除")
+        self.delete_btn.setObjectName("Danger")
+        self.delete_btn.clicked.connect(lambda: self.deleted.emit(self._task_id or ""))
+        self.delete_btn.setVisible(False)
+        buttons.addWidget(self.delete_btn)
+        buttons.addStretch(1)
+
         self.save_btn = QPushButton("保存")
         self.save_btn.setObjectName("Primary")
         self.save_btn.clicked.connect(self.commit)
@@ -215,18 +219,15 @@ class TaskForm(QWidget):
         self.complete_btn.clicked.connect(self._complete)
         self.complete_btn.setVisible(False)
         buttons.addWidget(self.complete_btn)
-        self.delete_btn = QPushButton("删除")
-        self.delete_btn.clicked.connect(lambda: self.deleted.emit(self._task_id or ""))
-        self.delete_btn.setVisible(False)
-        buttons.addWidget(self.delete_btn)
-        buttons.addStretch(1)
+
+        self.cancel_btn = None
         if modal:
-            cancel = QPushButton("取消")
-            cancel.clicked.connect(self.cancelled.emit)
-            buttons.addWidget(cancel)
+            self.cancel_btn = QPushButton("取消")
+            self.cancel_btn.clicked.connect(self.cancelled.emit)
+            buttons.addWidget(self.cancel_btn)
         root.addLayout(buttons)
 
-        self._toggle_due(True)
+        self._apply_due_mode()
 
     # ---- public ----
     def set_parent(self, parent_id: str | None) -> None:
@@ -242,13 +243,9 @@ class TaskForm(QWidget):
     def load_task(self, task: Task) -> None:
         self._task_id = task.id
         self.set_parent(task.parent_id)
-        self.set_parent(task.parent_id)
         self.title_edit.setText(task.title)
         self.owner.setCurrentIndex(max(0, self.owner.findData(task.owner_id)))
-        has_due = task.due_time is not None
-        self.due_enable.setChecked(has_due)
-        if has_due:
-            self.due_edit.setDateTime(task.due_time)
+        self._select_due(task.due_time)
         idx = self.recurrence.findData(task.recurrence)
         self.recurrence.setCurrentIndex(idx if idx >= 0 else 0)
         aidx = self.rec_anchor.findData(task.recurrence_anchor)
@@ -266,18 +263,15 @@ class TaskForm(QWidget):
         self.note_edit.setHtml(task.note or "")
         if self.notes is not None:
             self.notes.set_task(task.id)
-        if self.subtasks is not None:
-            self.subtasks.load(task.id)
         self.complete_btn.setVisible(True)
         self.delete_btn.setVisible(True)
-        self._toggle_due(has_due)
 
     def clear_form(self) -> None:
         self._task_id = None
         self.set_parent(None)
         self.title_edit.clear()
         self.owner.setCurrentIndex(0)
-        self.due_edit.setDateTime(datetime.now().replace(minute=0) + timedelta(hours=1))
+        self._select_mode("due_today")
         self.recurrence.setCurrentIndex(0)
         self.rec_anchor.setCurrentIndex(0)
         self.rec_until_check.setChecked(False)
@@ -287,13 +281,11 @@ class TaskForm(QWidget):
         self.note_edit.clear()
         if self.notes is not None:
             self.notes.set_task(None)
-        if self.subtasks is not None:
-            self.subtasks.load(None)
         self.complete_btn.setVisible(False)
         self.delete_btn.setVisible(False)
 
     def _show_note_count(self, count: int) -> None:
-        self.notes_tab.setTabText(1, f"记录({count})")
+        self.records_label.setText(f"记录 · {count}")
 
     def refresh_persons(self, persons: list[Person]) -> None:
         self.owner.set_persons(persons)
@@ -307,8 +299,7 @@ class TaskForm(QWidget):
         self.title_edit.setStyleSheet("")
 
         owner_id = self._resolve_owner()
-        due = self.due_edit.dateTime().toPython().replace(microsecond=0) \
-            if self.due_enable.isChecked() else None
+        due = self._due_value()
         existing = self.task_repo.get(self._task_id) if self._task_id else None
         task = existing or Task(id=self._task_id or new_id())
         task.title = title
@@ -350,16 +341,9 @@ class TaskForm(QWidget):
         self.owner.setCurrentIndex(max(0, self.owner.findData(created.id)))
         return created.id
 
-    def _toggle_due(self, on: bool) -> None:
-        self.due_edit.setEnabled(on)
-        self.recurrence.setEnabled(on)
-        self.reminder.setEnabled(on)
-        self.due_enable.setText("有截止时间" if on else "无截止时间")
-        self._toggle_rec_rules()
-
     def _toggle_rec_rules(self) -> None:
         self.rec_rules.setVisible(self._parent_id is None
-                                  and self.due_enable.isChecked()
+                                  and self._due_mode() != "due_none"
                                   and self.recurrence.currentData() is not None)
 
     def _until_value(self):
@@ -368,18 +352,61 @@ class TaskForm(QWidget):
         day = self.rec_until_edit.date().toPython()
         return datetime.combine(day, time.min)
 
-    def _quick_due(self, spec, label: str) -> None:
+    # ---- 完成时间：四枚胶囊 ----
+    _CAPSULES = ("due_none", "due_today", "due_tomorrow", "due_custom")
+
+    def _due_mode(self) -> str:
+        for name in self._CAPSULES:
+            if getattr(self, name).isChecked():
+                return name
+        return "due_none"
+
+    def _select_mode(self, mode: str) -> None:
+        for name in self._CAPSULES:
+            getattr(self, name).setChecked(name == mode)
+        self._apply_due_mode()
+
+    @staticmethod
+    def _due_target(mode: str) -> datetime:
+        """两枚预设胶囊落在哪：18:00 是「今天做完」，明天 09:00 是「明早第一件事」。"""
         now = datetime.now()
-        if spec is None and label.startswith("今天"):
-            target = now.replace(hour=18, minute=0, second=0, microsecond=0)
-        elif spec == 1:
-            target = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
-        else:  # 本周五
-            days_to_fri = (4 - now.weekday()) % 7
-            target = (now + timedelta(days=days_to_fri)).replace(hour=18, minute=0, second=0, microsecond=0)
-        self.due_enable.setChecked(True)
-        self.due_edit.setDateTime(target)
-        self._toggle_due(True)
+        if mode == "due_tomorrow":
+            return (now + timedelta(days=1)).replace(hour=9, minute=0,
+                                                     second=0, microsecond=0)
+        return now.replace(hour=18, minute=0, second=0, microsecond=0)
+
+    def _select_due(self, due: datetime | None) -> None:
+        """任务上的完成时间翻译回胶囊，对不上预设就走自定义。"""
+        if due is None:
+            self._select_mode("due_none")
+            return
+        wanted = due.replace(second=0, microsecond=0)
+        for mode in ("due_today", "due_tomorrow"):
+            if wanted == self._due_target(mode):
+                self._select_mode(mode)
+                return
+        self.due_edit.setDateTime(wanted)
+        self._select_mode("due_custom")
+
+    def _apply_due_mode(self, _id: int | None = None) -> None:
+        mode = self._due_mode()
+        self.due_edit.setVisible(mode == "due_custom")
+        if mode in ("due_today", "due_tomorrow"):
+            # 自定义控件始终跟着当前选择走，切来切去看到的和存下的才是同一个时间
+            self.due_edit.setDateTime(self._due_target(mode))
+        has_due = mode != "due_none"
+        self.recurrence.setEnabled(has_due)
+        self.reminder.setEnabled(has_due)
+        self._toggle_rec_rules()
+
+    def _due_value(self) -> datetime | None:
+        """胶囊就是完成时间的唯一入口：预设自己算，自定义照控件。"""
+        mode = self._due_mode()
+        if mode == "due_none":
+            return None
+        if mode == "due_custom":
+            return self.due_edit.dateTime().toPython().replace(microsecond=0)
+        return self._due_target(mode)
 
 
 class TaskDialog(QDialog):
@@ -388,7 +415,8 @@ class TaskDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("编辑任务" if task else ("新子任务" if parent_id else "新任务"))
         # 只锁宽度：显式最小高会盖掉布局算出的最小高，「保存」就被挤到窗口外面
-        self.setMinimumWidth(480)
+        # 宽度下限由「完成时间」那一行四枚胶囊决定，再窄「自定义…」就出界了
+        self.setMinimumWidth(520)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.form = TaskForm(tokens, task_repo, person_repo, self, modal=True)

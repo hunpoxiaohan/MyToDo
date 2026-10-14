@@ -13,7 +13,7 @@ for pkg in ("winrt", "windows_toasts", "plyer"):
     binaries += b
     hiddenimports += h
 
-datas += [("assets/app.png", "assets"), ("assets/app.ico", "assets")]
+datas += [("assets", "assets")]
 
 a = Analysis(
     ["entry.py"],

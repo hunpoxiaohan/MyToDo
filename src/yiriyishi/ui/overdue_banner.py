@@ -30,12 +30,12 @@ class OverdueBanner(QFrame):
         lay.addWidget(self.text, 1)
 
         self.tonight_btn = QPushButton("全部顺延到今晚 18:00")
-        self.tonight_btn.setObjectName("Ghost")
+        self.tonight_btn.setObjectName("BannerAction")
         self.tonight_btn.clicked.connect(lambda: self._fire(18, 0))
         lay.addWidget(self.tonight_btn)
 
         self.tomorrow_btn = QPushButton("全部顺延到明天 09:00")
-        self.tomorrow_btn.setObjectName("Ghost")
+        self.tomorrow_btn.setObjectName("BannerAction")
         self.tomorrow_btn.clicked.connect(lambda: self._fire(9, 0, days=1))
         lay.addWidget(self.tomorrow_btn)
 

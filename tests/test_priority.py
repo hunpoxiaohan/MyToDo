@@ -137,3 +137,35 @@ def test_thresholds_are_configurable(now):
 )
 def test_humanize(minutes, text):
     assert priority.humanize_left(minutes) == text
+
+
+# ---------------- 列表日期标签：全项目唯一一个出口 ----------------
+NOW = datetime(2026, 10, 9, 12)   # 周五
+
+
+@pytest.mark.parametrize(
+    "due,text",
+    [
+        (None, ""),                                       # 没排期就什么都不写，别占位
+        (datetime(2026, 10, 9, 18), "今天 18:00"),
+        (datetime(2026, 10, 10, 9), "明天 09:00"),
+        (datetime(2026, 10, 10, 0), "明天"),                # 00:00 = 只关心日子
+        (datetime(2026, 10, 12, 15), "周一 15:00"),         # 本周内用星期，比日期好读
+        (datetime(2026, 10, 15, 0), "周四"),
+        (datetime(2026, 10, 16, 0), "10-16"),               # 第 7 天起换成日子
+        (datetime(2026, 10, 25, 14), "10-25"),
+        (datetime(2027, 1, 3, 14), "2027-01-03"),          # 跨年才写全年份
+        (datetime(2026, 10, 9, 11, 20), "逾期 40 分"),
+        (datetime(2026, 10, 9, 10, 30), "逾期 1 小时"),
+        (datetime(2026, 10, 8, 12), "逾期 1 天"),
+        (datetime(2026, 9, 20, 12), "逾期 19 天"),
+    ],
+)
+def test_format_due_gives_one_short_label_everywhere(due, text):
+    assert priority.format_due(due, NOW) == text
+
+
+def test_format_due_labels_the_future_edge_of_the_week(now):
+    """周五当天到下周四都算「本周内」——再远写星期就反而绕了。"""
+    assert priority.format_due(datetime(2026, 10, 15), now) == "周四"
+    assert priority.format_due(datetime(2026, 10, 16), now) == "10-16"

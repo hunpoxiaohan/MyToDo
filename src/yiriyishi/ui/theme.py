@@ -6,6 +6,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import QApplication
 
+from ..paths import asset_dir
+
 # 唯一的颜色真相源：控件一律通过 token() 取色，禁止硬编码 hex。
 LEVEL_COLORS = {
     "light": {
@@ -136,6 +138,8 @@ def build_qss(t: Tokens) -> str:
     c = t.c
     accent_hover = _mix(c("accent"), c("text"), 0.14)
     overdue_bg = _mix(c("surface"), c("danger"), 0.10)
+    # Qt 只在 QSS 给到真实图片时才画 ::down-arrow，光靠边框拼三角会渲成方块
+    chevron = (asset_dir() / f"chevron-{t.mode}.png").as_posix()
     return f"""
 QWidget {{ background:{c('bg')}; color:{c('text')}; font-size:13px; }}
 QMainWindow, QDialog {{ background:{c('bg')}; }}
@@ -172,6 +176,17 @@ QPushButton#Ghost {{
 }}
 QPushButton#Ghost:hover {{ color:{c('text')}; background:{c('surface_alt')}; border-radius:10px; }}
 QPushButton#Ghost:checked {{ color:{c('accent_text')}; background:{c('accent')}; }}
+/* 破坏性动作：平时只是红字，按下才铺红，免得一排按钮里有个太抢眼的 */
+QPushButton#Danger {{
+    background:transparent; border:1px solid {c('border')}; color:{c('danger')};
+}}
+QPushButton#Danger:hover {{ background:{c('danger')}; border:1px solid {c('danger')}; color:{c('accent_text')}; }}
+/* 逾期横幅里的出口：Ghost 的灰字压在浅红底上像被禁用了，给它一圈红描边 */
+QPushButton#BannerAction {{
+    background:transparent; border:1px solid {c('danger')}; border-radius:10px;
+    color:{c('danger')}; padding:5px 12px;
+}}
+QPushButton#BannerAction:hover {{ background:{c('danger')}; color:{c('accent_text')}; }}
 
 /* ---------- 分类 chip ---------- */
 #CategoryChip {{
@@ -194,7 +209,14 @@ QLineEdit:focus, QTextEdit:focus, QDateTimeEdit:focus, QComboBox:focus, QSpinBox
     border:1px solid {c('accent')}; background:{c('surface')};
 }}
 QComboBox::drop-down {{ border:none; width:20px; }}
-QDateTimeEdit::down-button {{ border:none; width:16px; background:transparent; }}
+QDateTimeEdit::drop-down, QDateEdit::drop-down, QTimeEdit::drop-down {{
+    subcontrol-origin: padding; subcontrol-position: center right;
+    border:none; width:18px; background:transparent;
+}}
+QComboBox::down-arrow, QDateTimeEdit::down-arrow, QDateEdit::down-arrow,
+QTimeEdit::down-arrow {{
+    image: url("{chevron}"); width:14px; height:14px;
+}}
 QComboBox QAbstractItemView {{
     background:{c('surface')}; border:1px solid {c('border')}; border-radius:10px;
     selection-background-color:{c('accent_soft')}; selection-color:{c('text')}; outline:none;
@@ -228,15 +250,17 @@ QGroupBox::title {{
 }}
 #RowDone:hover {{ background:{c('accent')}; border:1px solid {c('accent')}; color:{c('accent_text')}; }}
 
-/* ---------- 详情：备注 / 记录 Tab ---------- */
-QTabWidget#NotesTab::pane {{
-    background:{c('surface')}; border:1px solid {c('border')}; border-radius:12px;
+/* ---------- 详情：完成时间胶囊 ---------- */
+#Capsule {{
+    background:transparent; border:1px solid {c('border')};
+    border-radius:14px; padding:5px 12px; color:{c('text_muted')};
 }}
-QTabBar::tab {{
-    background:transparent; color:{c('text_muted')}; border:none; margin:0;
-    padding:5px 12px; border-radius:9px; font-size:12px;
+#Capsule:hover {{ border:1px solid {c('hover')}; color:{c('text')}; }}
+#Capsule:checked {{
+    background:{c('accent')}; border:1px solid {c('accent')};
+    color:{c('accent_text')}; font-weight:600;
 }}
-QTabBar::tab:selected {{ background:{c('accent_soft')}; color:{c('text')}; font-weight:600; }}
+#Capsule:disabled {{ color:{c('text_muted')}; border:1px solid {c('border')}; }}
 
 /* ---------- 记录时间线 ---------- */
 #NoteList {{ background:transparent; border:none; }}

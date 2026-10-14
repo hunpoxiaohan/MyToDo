@@ -83,11 +83,12 @@ class TaskRepository(_Base):
         return _collapse_groups(tasks) if collapse_recurring else tasks
 
     def subtasks(self, parent_id: str) -> list[Task]:
-        """子任务：有截止时间的排前面，没有的按创建顺序垫底。"""
+        """子任务：有截止时间的排前面，没有的按创建顺序垫底。
+        归档的不算 —— 父行徽标（_children 同一条口径）和树上的子行必须对得上。"""
         rows = self._conn.execute(
-            f"SELECT {_TASK_COLS} FROM tasks WHERE parent_id=?"
+            f"SELECT {_TASK_COLS} FROM tasks WHERE parent_id=? AND status != ?"
             " ORDER BY due_time IS NULL, due_time, created_at, rowid",
-            (parent_id,),
+            (parent_id, STATUS_ARCHIVED),
         ).fetchall()
         return [Task.from_row(r) for r in rows]
 
@@ -191,6 +192,26 @@ class TaskRepository(_Base):
                 "UPDATE tasks SET postponed_until=?, last_notified_at=NULL WHERE id=?",
                 (fmt_dt(until), task_id),
             )
+
+    def reopen(self, task_id: str) -> None:
+        """把误点完成的当期拉回待办。
+
+        那次完成顺手滚出来的下一期一并收掉：它不是用户建的，留着就是列表折叠后看不见的幽灵。
+        """
+        task = self.get(task_id)
+        if task is None or task.status == STATUS_TODO:
+            return
+        task.status = STATUS_TODO
+        task.completed_at = None
+        self.save(task)
+        if not (task.recurrence and task.recurrence_group_id and task.due_time):
+            return
+        later = self._conn.execute(
+            "SELECT id FROM tasks WHERE recurrence_group_id=? AND status=? AND due_time>?",
+            (task.recurrence_group_id, STATUS_TODO, fmt_dt(task.due_time)),
+        ).fetchall()
+        for row in later:
+            self.delete(row["id"])
 
     def stats(self, now: datetime) -> dict:
         tasks = self.list()

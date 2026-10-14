@@ -156,3 +156,32 @@ def humanize_left(minutes: float | None) -> str:
         h = rem // 60
         tail = f"{d} 天 {h} 小时" if h else f"{d} 天"
     return f"已逾期 {tail}" if total < 0 else f"{tail}后"
+
+
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def format_due(due: datetime | None, now: datetime) -> str:
+    """列表日期的唯一出口：短、稳定、不每分钟变。倒计时只留给通知文案。"""
+    if due is None:
+        return ""
+    if due < now:
+        delta = now - due
+        if delta.days >= 1:
+            return f"逾期 {delta.days} 天"
+        if delta.total_seconds() >= 3600:
+            return f"逾期 {int(delta.total_seconds() // 3600)} 小时"
+        return f"逾期 {max(1, int(delta.total_seconds() // 60))} 分"
+    # 00:00 是「只关心日子」的写法，标签里就别带 00:00 这种噪音
+    tail = "" if (due.hour, due.minute) == (0, 0) else f" {due:%H:%M}"
+    days = (due.date() - now.date()).days
+    if days == 0:
+        return f"今天{tail}"
+    if days == 1:
+        return f"明天{tail}"
+    if days <= 6:
+        return f"{_WEEKDAYS[due.weekday()]}{tail}"
+    if due.year != now.year:
+        return f"{due:%Y-%m-%d}"
+    return f"{due:%m-%d}"
+

@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import QRect, Qt, QTimer
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from ..core import priority
 from ..core.config import load_settings, save_settings
 from ..core.db import connect, init_db
-from ..core.models import STATUS_TODO, Task
+from ..core.models import STATUS_DONE, STATUS_TODO, Task
 from ..core.notify import Notifier
 from ..core.priority import Bucket
 from ..core.recurrence import complete_and_roll
@@ -26,7 +26,7 @@ from .float_panel import BALL, FloatBall, FloatPanel
 from .overdue_banner import OverdueBanner
 from .settings_dialog import SettingsDialog
 from .task_form import TaskDialog, TaskForm
-from .task_list import TaskList
+from .task_list import TaskTree, row_for
 from .theme import apply_theme, refresh_tokens, resolve_mode, tokens
 from .toast_banner import ToastBanner
 
@@ -34,7 +34,7 @@ log = logging.getLogger("yiriyishi.ui.main_window")
 
 REFRESH_INTERVAL_MS = 60_000   # 每分钟重算优先级，让颜色随时间自动升级
 FLASH_INTERVAL_MS = 1000
-LIST_MIN_WIDTH = 260           # 再窄标题就整行省略，读不出任务是什么
+LIST_MIN_WIDTH = 300           # 树里有缩进和右侧胶囊，再窄标题就整行省略了
 
 
 def _usable_rect() -> QRect:
@@ -139,10 +139,13 @@ class MainWindow(QMainWindow):
         root.addWidget(self.overdue_banner)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.list = TaskList(self.t)
+        self.list = TaskTree(self.t)
         self.list.setMinimumWidth(LIST_MIN_WIDTH)
-        self.list.activated_task.connect(self.focus_task)
-        self.list.currentItemChanged.connect(lambda *_: self._sync_detail())
+        self.list.activated_task.connect(self.open_task_edit)
+        self.list.status_menu_requested.connect(self._ask_status)
+        self.list.add_subtask_requested.connect(self.open_new_subtask)
+        self.list.collapsed_changed.connect(self._on_collapsed)
+        self.list.selectionModel().currentChanged.connect(lambda *_: self._sync_detail())
         self.splitter.addWidget(self.list)
 
         self.detail = TaskForm(self.t, self.task_repo, self.person_repo, note_repo=self.note_repo)
@@ -150,9 +153,6 @@ class MainWindow(QMainWindow):
         self.detail.saved.connect(lambda _id: (self._clear_draft(), self.reload()))
         self.detail.completed.connect(self._on_completed)
         self.detail.deleted.connect(self._on_deleted)
-        self.detail.subtasks.changed.connect(self.reload)
-        self.detail.subtasks.add_requested.connect(self.open_new_subtask)
-        self.detail.subtasks.edit_requested.connect(self.open_task_edit)
         self.detail.title_edit.textEdited.connect(lambda *_: self._draft_timer.start())
         self.detail.note_edit.textChanged.connect(lambda *_: self._draft_timer.start())
 
@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
         self.ball.position_changed.connect(self._on_ball_moved)
         self.panel = FloatPanel(self.t)
         self.panel.task_activated.connect(self.focus_task)
-        self.panel.task_completed.connect(self.complete_task)
+        self.panel.status_menu_requested.connect(self._ask_status)
         self.panel.new_requested.connect(self.open_new_task)
         self.panel.open_main_requested.connect(self.show_main)
         self.panel.dismiss.connect(lambda: self._toggle_panel(False))
@@ -218,12 +218,14 @@ class MainWindow(QMainWindow):
 
         visible = [t for t in tasks if self._matches(t, now)]
         ordered = priority.sort_tasks(visible, now, self._sort, pset)
-        rows = [
-            (t, priority.compute_priority(t, now, pset), names.get(t.owner_id or "", ""))
-            for t in ordered
-        ]
+        rows, children_of = [], {}
+        for t in ordered:
+            rows.append(row_for(t, now, pset, names.get(t.owner_id or "", "")))
+            if t.subtask_total:
+                children_of[t.id] = self.task_repo.subtasks(t.id)
         selected = self.list.current_task()
-        self.list.load(rows, selected.id if selected else self.settings.selected_task_id)
+        self.list.load(rows, children_of, now, pset,
+                       selected.id if selected else self.settings.selected_task_id)
 
         counts: dict[Bucket, int] = {}
         for t in tasks:
@@ -278,9 +280,8 @@ class MainWindow(QMainWindow):
         self._category = None
         self._search = ""
         self.reload()
-        task = self.task_repo.get(task_id)
-        # 主列表没有子任务那一行，点它的通知就得落到父任务上（详情面板会展开它）
-        self.list.select_task(task.parent_id if task and task.parent_id else task_id)
+        # 子任务如今是树上的一行，直接定位它自己（select_task 会顺手展开父行）
+        self.list.select_task(task_id)
 
     def open_new_subtask(self, parent_id: str) -> None:
         self._toggle_panel(False)
@@ -306,7 +307,8 @@ class MainWindow(QMainWindow):
         for task_id in ids:
             self.task_repo.postpone(task_id, when)
         self.reload()
-        self.toast.show_message(f"已把 {len(ids)} 项顺延到 {when:%m-%d %H:%M}", None, seconds=6)
+        self.toast.show_message(f"已把 {len(ids)} 项顺延到 {priority.format_due(when, now)}",
+                                None, seconds=6)
 
     def deliver_review(self, review: Reminder) -> None:
         """晨间早报：系统通知是主通道，没有通知能力时退到应用内横幅。"""
@@ -319,8 +321,35 @@ class MainWindow(QMainWindow):
         self.reload()
         self.toast.show_message("已推迟 15 分钟，到期前会再次提醒", task_id, seconds=5)
 
+    def _status_menu(self, task: Task) -> QMenu:
+        """菜单只给反向动作：待办行只有「标记完成」，已完成行只有「重新打开」。
+
+        挂到发起请求的控件上，面板是置顶窗，菜单跟着它才不会垫到下面。
+        """
+        menu = QMenu(self.sender() or self)
+        if task.status == STATUS_DONE:
+            menu.addAction("重新打开", lambda: self.reopen_task(task.id))
+        else:
+            menu.addAction("标记完成", lambda: self.complete_task(task.id))
+        return menu
+
+    def _ask_status(self, task_id: str, pos: QPoint) -> None:
+        """改状态一律过一遍菜单：误点只会弹个菜单，点别处就什么都没发生。"""
+        task = self.task_repo.get(task_id)
+        if task is None:
+            return
+        self._status_menu(task).exec(pos)
+
+    def reopen_task(self, task_id: str) -> None:
+        task = self.task_repo.get(task_id)
+        if task is None:
+            return
+        self.task_repo.reopen(task_id)
+        self.reload()
+        self.toast.show_message(f"已把「{task.title}」放回待办", task_id, seconds=4)
+
     def complete_task(self, task_id: str) -> None:
-        """面板行内 ✓：就地完成，不打断面板（周期任务自动滚到下一期）。"""
+        """菜单里点了「标记完成」才走到这里（周期任务自动滚到下一期）。"""
         task = self.task_repo.get(task_id)
         if task is None:
             return
@@ -470,10 +499,17 @@ class MainWindow(QMainWindow):
             "x": self.x(), "y": self.y(), "w": self.width(), "h": self.height(),
             "maximized": self.isMaximized(),
             "splitter": list(self.splitter.sizes()),
+            "collapsed": sorted(self.list.collapsed_ids()),
         }
         self.settings.selected_task_id = (
             self.list.current_task().id if self.list.current_task() else None
         )
+        save_settings(self.paths, self.settings)
+
+    def _on_collapsed(self, ids) -> None:
+        """折了哪个父行随手存：reload() 每分钟重置模型，靠这份名单才长得回同一棵树。"""
+        self.settings.window_geometry = {**(self.settings.window_geometry or {}),
+                                         "collapsed": sorted(ids)}
         save_settings(self.paths, self.settings)
 
     def _restore_geometry(self) -> None:
@@ -486,6 +522,7 @@ class MainWindow(QMainWindow):
             sizes = g.get("splitter")
             if sizes and len(sizes) == 2 and sum(sizes) > 0:
                 self.splitter.setSizes(sizes)
+            self.list.set_collapsed_ids(g.get("collapsed", ()))
         if g and g.get("maximized"):
             self.showMaximized()
 
